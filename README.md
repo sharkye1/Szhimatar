@@ -1,7 +1,7 @@
 # 🎥 Сжиматор на NVENC
 
 ![GitHub](https://img.shields.io/badge/license-MIT-blue)
-![GitHub release](https://img.shields.io/github/releases/sharkye1/Szhimatar)
+![GitHub release](https://img.shields.io/github/release/sharkye1/Szhimatar)
 ![GitHub issues](https://img.shields.io/github/issues/sharkye1/Szhimatar)
 
 **Сжиматор на NVENC** — это мощное и удобное приложение для сжатия видео с использованием аппаратного ускорения NVIDIA NVENC. Программа поддерживает популярные форматы видео (MP4, AVI, MOV и др.) и позволяет гибко настраивать параметры сжатия: разрешение, битрейт, FPS, качество звука и многое другое.
