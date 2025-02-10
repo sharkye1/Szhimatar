@@ -1,4 +1,7 @@
 import os
+import sys
+from concurrent.futures import ThreadPoolExecutor
+import platform
 import time
 import json
 import subprocess
@@ -159,10 +162,6 @@ class VideoCompressor(QMainWindow):
         size_layout.addWidget(self.size_value)
 
 
-        # Подключить сигналы для пересчета
-        self.bitrate_spin.valueChanged.connect(self.update_estimated_size)
-        self.audio_bitrate_spin.valueChanged.connect(self.update_estimated_size)
-        self.file_btn.clicked.connect(self.update_estimated_size)
 
         # Прогресс и логи
         self.progress_bar = QProgressBar()
@@ -241,7 +240,9 @@ class VideoCompressor(QMainWindow):
             self.setStyleSheet(light_stylesheet)
             self.theme_action.setText("Тёмная тема")
 
+
     def select_file(self):
+        """Выбирает файл и обновляет интерфейс."""
         file, _ = QFileDialog.getOpenFileName(
             self, "Выберите видеофайл",
             self.last_dir,
@@ -251,13 +252,46 @@ class VideoCompressor(QMainWindow):
             self.current_file = file
             self.last_dir = os.path.dirname(file)
             self.file_label.setText(f"Выбран файл: {os.path.basename(file)}")
-            self.update_output_size()
+
+            # Получаем размер файла
+            original_size = os.path.getsize(file)
+
+            # Вычисляем 22% от исходного размера
+            compressed_size = original_size * 0.22
+
+            # Форматируем размер для отображения
+            compressed_size_mb = compressed_size / (1024 * 1024)  # Переводим в мегабайты
+            original_size_mb = original_size / (1024 * 1024)  # Переводим в мегабайты
+
+            # Вычисляем процент сжатия
+            percent_change = ((compressed_size_mb - original_size_mb) / original_size_mb) * 100
+
+            # Обновляем отображение
+            self.size_value.setText(f"{compressed_size_mb:.2f} MB ({percent_change:.2f}%)")
+
+
 
     def compress_video(self):
         print('Пошел компресс...')
         if not hasattr(self, 'current_file'):
             QMessageBox.warning(self, "Ошибка", "Выберите файл для сжатия!")
             return
+
+        # Получаем исходный размер файла
+        original_size = os.path.getsize(self.current_file)
+
+        # Вычисляем 22% от исходного размера
+        compressed_size = original_size * 0.22
+
+        # Форматируем размер для отображения
+        compressed_size_mb = compressed_size / (1024 * 1024)  # Переводим в мегабайты
+        original_size_mb = original_size / (1024 * 1024)  # Переводим в мегабайты
+
+        # Вычисляем процент сжатия
+        percent_change = ((compressed_size_mb - original_size_mb) / original_size_mb) * 100
+
+        # Обновляем отображение
+        self.size_value.setText(f"{compressed_size_mb:.2f} MB ({percent_change:.2f}%)")
 
         self.original_size = os.path.getsize(self.current_file)
         self.start_time = time.time()
@@ -342,16 +376,27 @@ class VideoCompressor(QMainWindow):
         self.log_area.append(f"Примерный размер выходного файла: {size_mb:.2f} МБ")
 
     def get_video_duration(self):
-        """Возвращает длительность видео в секундах"""
-        cmd = [
-            'ffprobe',
-            '-v', 'error',
-            '-show_entries', 'format=duration',
-            '-of', 'default=noprint_wrappers=1:nokey=1',
-            self.current_file
-        ]
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        return float(result.stdout.strip())
+        """Возвращает длительность видео, обрабатывает ошибки."""
+        try:
+            # Настройки для скрытия консоли
+            startupinfo = None
+            if platform.system() == 'Windows':
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+            result = subprocess.run(
+                ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+                 '-of', 'default=noprint_wrappers=1:nokey=1', self.current_file],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                startupinfo=startupinfo,
+                creationflags=subprocess.CREATE_NO_WINDOW if platform.system() == 'Windows' else 0
+            )
+            return float(result.stdout.strip())
+        except Exception as e:
+            print(f"Ошибка получения длительности: {e}")
+            return 0.0
 
     def save_preset(self):
         print('сейв пресет зашел')
@@ -508,73 +553,28 @@ class VideoCompressor(QMainWindow):
         QMessageBox.information(self, "Статистика сжатия", stats_message)
 
     def get_original_audio_bitrate(self):
-        """Возвращает битрейт аудио из исходного файла."""
-        cmd = [
-            'ffprobe',
-            '-v', 'error',
-            '-show_entries', 'stream=bit_rate',
-            '-of', 'default=noprint_wrappers=1:nokey=1',
-            '-select_streams', 'a:0',  # Выбираем первый аудиопоток
-            self.current_file
-        ]
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        return int(result.stdout.strip()) / 1000  # Переводим в Кбит/с
+        """Возвращает битрейт аудио с обработкой ошибок."""
+        try:
+            startupinfo = None
+            if platform.system() == 'Windows':
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
 
-    def update_estimated_size(self):
-        """Обновляет расчетный размер при изменении параметров."""
-        if hasattr(self, 'current_file'):
-            try:
-                # Получаем длительность видео
-                duration = self.get_video_duration()
+            result = subprocess.run(
+                ['ffprobe', '-v', 'error', '-show_entries', 'stream=bit_rate',
+                 '-of', 'default=noprint_wrappers=1:nokey=1', '-select_streams', 'a:0', self.current_file],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                startupinfo=startupinfo,
+                creationflags=subprocess.CREATE_NO_WINDOW if platform.system() == 'Windows' else 0
+            )
+            return int(result.stdout.strip() or 0) / 1000
+        except Exception as e:
+            print(f"Ошибка аудио битрейта: {e}")
+            return 0
 
-                # Получаем битрейт видео
-                video_bitrate = self.bitrate_spin.value() * 1000  # Переводим Мбит/с в Кбит/с
 
-                # Учитываем кодек видео
-                video_codec = self.codec_combo.currentText()
-                if "hevc" in video_codec.lower():
-                    # HEVC (H.265) более эффективен, чем H.264
-                    video_bitrate *= 0.7  # Примерно на 30% меньше
-                elif "h264" in video_codec.lower():
-                    # H.264 менее эффективен, чем HEVC
-                    video_bitrate *= 1.0  # Без изменений
-
-                # Получаем битрейт аудио
-                audio_bitrate = self.audio_bitrate_spin.value()
-
-                # Учитываем кодек аудио
-                audio_codec = self.audio_codec_combo.currentText()
-                if audio_codec == "aac":
-                    # AAC более эффективен, чем MP3
-                    audio_bitrate *= 0.9  # Примерно на 10% меньше
-                elif audio_codec == "libmp3lame":
-                    # MP3 менее эффективен, чем AAC
-                    audio_bitrate *= 1.0  # Без изменений
-                elif audio_codec == "copy":
-                    # Если аудио не сжимается, используем исходный битрейт
-                    audio_bitrate = self.get_original_audio_bitrate()  # Нужно реализовать этот метод
-
-                # Расчет размера в килобитах
-                total_kbits = (video_bitrate + audio_bitrate) * duration
-                # Конвертация в мегабайты
-                size_mb = total_kbits / (8 * 1024)  # 8 бит в байте, 1024 Кб в Мб
-
-                # Получаем исходный размер файла
-                original_size_mb = os.path.getsize(self.current_file) / (1024 * 1024)  # В мегабайтах
-
-                # Вычисляем процент изменения
-                if original_size_mb > 0:
-                    percent_change = ((size_mb - original_size_mb) / original_size_mb) * 100
-                    percent_text = f"({percent_change:+.2f}%)"
-                else:
-                    percent_text = "(N/A)"
-
-                # Обновляем отображение
-                self.size_value.setText(f"{size_mb:.2f} MB {percent_text}")
-            except Exception as e:
-                self.size_value.setText("N/A")
-        else:
-            self.size_value.setText("Выберите файл")
 
     def format_size(self, size):
         """Форматирует размер файла в удобочитаемый вид (KB, MB, GB)."""

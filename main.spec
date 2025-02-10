@@ -3,10 +3,10 @@
 
 a = Analysis(
     ['main.py'],
-    pathex=[],
+    pathex=['C:\\Users\\тест\\AppData\\Roaming\\Python\\Python312\\site-packages'],
     binaries=[],
     datas=[],
-    hiddenimports=['PyQt6', 'styles'],
+    hiddenimports=['PyQt6', 'PyQt6.QtGui', 'PyQt6.QtWidgets', 'PyQt6.QtCore'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
