@@ -3,6 +3,9 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 import platform
 import time
+import random
+import requests
+
 import json
 import subprocess
 from PyQt6.QtGui import QAction, QPixmap, QPainter
@@ -10,7 +13,9 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QLabel, QPushButton, QFileDialog, QComboBox, QSlider,
                              QSpinBox, QCheckBox, QTextEdit, QMessageBox, QProgressBar,
                              QToolBar, QFrame, QInputDialog, QDoubleSpinBox)
-from PyQt6.QtCore import Qt, QProcess, QStandardPaths, QTimer, QSettings
+from PyQt6.QtCore import Qt, QProcess, QStandardPaths, QTimer, QSettings, QUrl
+from PyQt6.QtNetwork import (QNetworkAccessManager, QNetworkRequest, QNetworkReply)
+
 from styles import dark_stylesheet, light_stylesheet
 
 
@@ -29,18 +34,94 @@ class VideoCompressor(QMainWindow):
         self.init_ui()
         self.load_presets()
         self.load_settings()
-        self.background_image = QPixmap("background.jpg")
-        self.background_opacity = 0.1
+        self.background_image = QPixmap()
+        self.network_manager = QNetworkAccessManager(self)
+        self.network_manager.finished.connect(self.on_image_downloaded)
+        self.image_urls = [
+            "https://i.imgur.com/S721eIZ.png",  # Замените на ваши ссылки
+            "https://i.imgur.com/J2Ey9ce.png",
+            "https://i.imgur.com/MswgFY3.png",
+            "https://i.imgur.com/7RQtLnR.png",
+            "https://i.imgur.com/IXNVtAa.png",
 
+        ]
+        self.cache_dir = os.path.join(os.path.dirname(__file__), "backs")
+        os.makedirs(self.cache_dir, exist_ok=True)  # Создаем папку, если её нет
 
+        self.download_background_image()
+
+        self.background_opacity = 0.2
+
+    def download_background_image(self):
+        """Скачивает новое изображение или использует уже скачанное."""
+        # Получаем список уже скачанных изображений
+        downloaded_images = self.get_downloaded_images()
+
+        # Находим нескачанные изображения
+        not_downloaded_urls = [url for url in self.image_urls if self.get_image_filename(url) not in downloaded_images]
+
+        if not_downloaded_urls:
+            # Если есть нескачанные изображения, выбираем одно из них
+            image_url = random.choice(not_downloaded_urls)
+            #print(f"Загружаем новое изображение: {image_url}")
+            request = QNetworkRequest(QUrl(image_url))
+            self.network_manager.get(request)
+        else:
+            # Если все изображения скачаны, выбираем случайное из уже скачанных
+            if downloaded_images:
+                random_image = random.choice(downloaded_images)
+                self.background_image.load(os.path.join(self.cache_dir, random_image))
+                self.update()
+                #print(f"Используем уже скачанное изображение: {random_image}")
+            else:
+                print("Нет доступных изображений.")
+
+    def get_downloaded_images(self):
+        """Возвращает список уже скачанных изображений."""
+        return [f for f in os.listdir(self.cache_dir) if f.endswith(('.png', '.jpg', '.jpeg'))]
+
+    def get_image_filename(self, url):
+        """Генерирует имя файла на основе URL."""
+        return url.split('/')[-1]  # Извлекаем имя файла из URL
+
+    def on_image_downloaded(self, reply):
+        """Обрабатывает скачанное изображение."""
+        if reply.error() == QNetworkReply.NetworkError.NoError:
+            image_data = reply.readAll()
+            if image_data.size() > 0:  # Проверяем, что данные не пустые
+                #print("Изображение успешно скачано!")
+
+                # Загружаем изображение в QPixmap
+                self.background_image.loadFromData(image_data)
+                self.update()  # Обновляем интерфейс
+
+                # Сохраняем изображение в папку backs
+                image_url = reply.url().toString()
+                filename = self.get_image_filename(image_url)
+                cache_path = os.path.join(self.cache_dir, filename)
+
+                with open(cache_path, "wb") as f:
+                    f.write(image_data)
+
+                #print(f"Изображение сохранено в: {cache_path}")
+            else:
+                print("Ошибка: изображение не содержит данных.")
+        else:
+            print("Ошибка при загрузке изображения:", reply.errorString())
 
     def paintEvent(self, event):
+        """Отрисовывает фоновое изображение."""
         painter = QPainter(self)
         if not self.background_image.isNull():
-            scaled_pixmap = self.background_image.scaled(self.size(),
-                                                         aspectRatioMode=Qt.AspectRatioMode.KeepAspectRatioByExpanding)
+            scaled_pixmap = self.background_image.scaled(
+                self.size(),
+                aspectRatioMode=Qt.AspectRatioMode.KeepAspectRatioByExpanding
+            )
             painter.setOpacity(self.background_opacity)
             painter.drawPixmap(self.rect(), scaled_pixmap)
+
+
+
 
     def init_ui(self):
         self.setWindowTitle("Сжиматор на NVENC")
@@ -307,7 +388,9 @@ class VideoCompressor(QMainWindow):
         speed = self.speed_spin.value()
         # Обернем пути в кавычки для корректной обработки FFmpeg
         input_file = f'"{self.current_file}"'
+        output_file = output_file.replace('\\', '/')
         output_file = f'"{output_file}"'
+        print(output_file)
 
         cmd = [
             'ffmpeg',
@@ -329,12 +412,13 @@ class VideoCompressor(QMainWindow):
         self.process = QProcess()
         self.process.readyReadStandardError.connect(self.handle_log)
         self.process.finished.connect(self.on_finish)
+        print(f"Дана команда {cmd}")
         self.process.startCommand(' '.join(cmd))
 
         # Таймер для обновления прогресса
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_progress)
-        self.timer.start(26)
+        self.timer.start(nkirill)
 
     def update_speed_spin(self):
         """Обновляет значение скорости в QDoubleSpinBox при изменении ползунка."""
@@ -596,6 +680,7 @@ class VideoCompressor(QMainWindow):
 
 
 if __name__ == "__main__":
+    nkirill = 40
     app = QApplication([])
     window = VideoCompressor()
     window.show()
