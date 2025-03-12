@@ -1,6 +1,5 @@
 import os
 import sys
-from concurrent.futures import ThreadPoolExecutor
 import platform
 import time
 import random
@@ -11,12 +10,57 @@ import subprocess
 from PyQt6.QtGui import QAction, QPixmap, QPainter
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QLabel, QPushButton, QFileDialog, QComboBox, QSlider,
-                             QSpinBox, QCheckBox, QTextEdit, QMessageBox, QProgressBar,
+                             QSpinBox, QTextEdit, QMessageBox, QProgressBar,
                              QToolBar, QFrame, QInputDialog, QDoubleSpinBox)
 from PyQt6.QtCore import Qt, QProcess, QStandardPaths, QTimer, QSettings, QUrl
 from PyQt6.QtNetwork import (QNetworkAccessManager, QNetworkRequest, QNetworkReply)
 
 from styles import dark_stylesheet, light_stylesheet
+
+def check_for_updates():
+    """Проверяет наличие обновлений и обновляет main.py."""
+    try:
+        # URL к raw-файлу на GitHub
+        github_url = "https://raw.githubusercontent.com/sharkye1/Szhimatar/main/main.py"
+
+        # Скачиваем новый main.py
+        response = requests.get(github_url)
+        if response.status_code == 200:
+            new_content = response.text
+
+            # Читаем текущий main.py
+            with open(__file__, "r", encoding="utf-8") as f:
+                current_content = f.read()
+
+            # Если содержимое отличается, обновляем файл
+            if new_content != current_content:
+                # Создаем папку old_vers, если её нет
+                old_vers_dir = os.path.join(os.path.dirname(__file__), "old_vers")
+                os.makedirs(old_vers_dir, exist_ok=True)
+
+                # Сохраняем текущую версию в папку old_vers
+                old_file_path = os.path.join(old_vers_dir, f"main_old_{len(os.listdir(old_vers_dir)) + 1}.py")
+                with open(old_file_path, "w", encoding="utf-8", newline="\n") as f:
+                    f.write(current_content)
+
+                # Сохраняем новый main.py во временный файл
+                temp_file = __file__ + ".tmp"
+                with open(temp_file, "w", encoding="utf-8", newline="\n") as f:
+                    f.write(new_content)
+
+                # Заменяем текущий main.py новым файлом
+                os.replace(temp_file, __file__)
+
+                # Перезапускаем программу
+                QMessageBox.information(None, "Обновление", "Программа обновлена. Перезапустите приложение.")
+                subprocess.Popen([sys.executable] + sys.argv)  # Запуск нового процесса
+                time.sleep(1)  # Задержка для завершения текущего процесса
+                sys.exit(0)  # Завершение текущего процесса
+    except Exception as e:
+        print(f"Ошибка при проверке обновлений: {e}")
+
+# Проверяем обновления при запуске
+check_for_updates()
 
 
 class VideoCompressor(QMainWindow):
@@ -79,6 +123,8 @@ class VideoCompressor(QMainWindow):
     def get_downloaded_images(self):
         """Возвращает список уже скачанных изображений."""
         return [f for f in os.listdir(self.cache_dir) if f.endswith(('.png', '.jpg', '.jpeg'))]
+
+
 
     def get_image_filename(self, url):
         """Генерирует имя файла на основе URL."""
@@ -349,6 +395,7 @@ class VideoCompressor(QMainWindow):
 
             # Обновляем отображение
             self.size_value.setText(f"{compressed_size_mb:.2f} MB ({percent_change:.2f}%)")
+
 
 
 
