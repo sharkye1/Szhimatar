@@ -21,7 +21,7 @@ def check_for_updates():
     """Проверяет наличие обновлений и обновляет main.py."""
     try:
         # URL к raw-файлу на GitHub
-        github_url = "https://raw.githubusercontent.com/sharkye1/Szhimatar/main/main.py"
+        github_url = "https://raw.githubusercontent.com/sharkye1/Szhimatar/refs/heads/main/main.py"
 
         # Скачиваем новый main.py
         response = requests.get(github_url)
