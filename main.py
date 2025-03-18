@@ -17,45 +17,50 @@ from PyQt6.QtNetwork import (QNetworkAccessManager, QNetworkRequest, QNetworkRep
 
 from styles import dark_stylesheet, light_stylesheet
 
+# Версия программы
+__version__ = "v1.0.0"
+
+def is_running_in_ide():
+    """Проверяет, запущена ли программа в PyCharm или IDLE."""
+    return any(ide in sys.argv[0] for ide in ("pycharm", "idlelib"))
+
+
 def check_for_updates():
     """Проверяет наличие обновлений и обновляет main.py."""
+    if is_running_in_ide():
+        print("Запуск через IDE, обновление пропущено.")
+        return
+
     try:
-        # URL к raw-файлу на GitHub
-        github_url = "https://raw.githubusercontent.com/sharkye1/Szhimatar/refs/heads/main/main.py"
-
-        # Скачиваем новый main.py
-        response = requests.get(github_url)
+        github_api_url = "https://api.github.com/repos/sharkye1/Szhimatar/releases/latest"
+        response = requests.get(github_api_url)
         if response.status_code == 200:
-            new_content = response.text
+            latest_release = response.json()
+            latest_version = latest_release.get("tag_name", "v1.0.0")
 
-            # Читаем текущий main.py
-            with open(__file__, "r", encoding="utf-8") as f:
-                current_content = f.read()
+            if latest_version != __version__:
+                reply = QMessageBox.question(
+                    None, "Обновление",
+                    f"Доступна новая версия {latest_version}. Хотите обновить программу?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                )
 
-            # Если содержимое отличается, обновляем файл
-            if new_content != current_content:
-                # Создаем папку old_vers, если её нет
-                old_vers_dir = os.path.join(os.path.dirname(__file__), "old_vers")
-                os.makedirs(old_vers_dir, exist_ok=True)
+                if reply == QMessageBox.StandardButton.Yes:
+                    download_url = f"https://github.com/sharkye1/Szhimatar/releases/download/{latest_version}/main.py"
+                    response = requests.get(download_url)
+                    if response.status_code == 200:
+                        new_content = response.text
+                        backup_file = __file__.replace(".py", "_backup.py")
 
-                # Сохраняем текущую версию в папку old_vers
-                old_file_path = os.path.join(old_vers_dir, f"main_old_{len(os.listdir(old_vers_dir)) + 1}.py")
-                with open(old_file_path, "w", encoding="utf-8", newline="\n") as f:
-                    f.write(current_content)
+                        # Создаём резервную копию
+                        os.rename(__file__, backup_file)
 
-                # Сохраняем новый main.py во временный файл
-                temp_file = __file__ + ".tmp"
-                with open(temp_file, "w", encoding="utf-8", newline="\n") as f:
-                    f.write(new_content)
+                        with open(__file__, "w", encoding="utf-8", newline="\n") as f:
+                            f.write(new_content)
 
-                # Заменяем текущий main.py новым файлом
-                os.replace(temp_file, __file__)
-
-                # Перезапускаем программу
-                QMessageBox.information(None, "Обновление", "Программа обновлена. Перезапустите приложение.")
-                subprocess.Popen([sys.executable] + sys.argv)  # Запуск нового процесса
-                time.sleep(1)  # Задержка для завершения текущего процесса
-                sys.exit(0)  # Завершение текущего процесса
+                        QMessageBox.information(None, "Обновление", "Программа обновлена. Перезапустите приложение.")
+                        subprocess.Popen([sys.executable, __file__] + sys.argv[1:])
+                        sys.exit(0)
     except Exception as e:
         print(f"Ошибка при проверке обновлений: {e}")
 
@@ -728,7 +733,7 @@ class VideoCompressor(QMainWindow):
 
 if __name__ == "__main__":
     nkirill = 40
-    app = QApplication([])
+    app = QApplication(sys.argv)
     window = VideoCompressor()
     window.show()
     app.exec()
