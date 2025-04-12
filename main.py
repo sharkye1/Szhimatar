@@ -4,6 +4,7 @@ import platform
 import time
 import random
 import requests
+import logging
 
 import json
 import subprocess
@@ -14,58 +15,89 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QToolBar, QFrame, QInputDialog, QDoubleSpinBox)
 from PyQt6.QtCore import Qt, QProcess, QStandardPaths, QTimer, QSettings, QUrl
 from PyQt6.QtNetwork import (QNetworkAccessManager, QNetworkRequest, QNetworkReply)
+from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput, QSoundEffect
 
 from styles import dark_stylesheet, light_stylesheet
 
 # Версия программы
-__version__ = "v1.0.0"
+__version__ = "v1.1.2"
+
 
 def is_running_in_ide():
     """Проверяет, запущена ли программа в PyCharm или IDLE."""
-    return any(ide in sys.argv[0] for ide in ("pycharm", "idlelib"))
+    return any(ide in sys.argv[0].lower() for ide in ("pycharm", "idlelib"))
 
+def log_error(message):
+    """Записывает ошибки обновления в файл."""
+    with open("update_log.txt", "a", encoding="utf-8") as f:
+        f.write(message + "\n")
 
 def check_for_updates():
-    """Проверяет наличие обновлений и обновляет main.py."""
+    """Проверяет наличие обновлений и обновляет main.py автоматически."""
     if is_running_in_ide():
         print("Запуск через IDE, обновление пропущено.")
         return
-
+    print('HTTPcode200 =', end=' ')
     try:
         github_api_url = "https://api.github.com/repos/sharkye1/Szhimatar/releases/latest"
         response = requests.get(github_api_url)
         if response.status_code == 200:
+            print('True')
             latest_release = response.json()
             latest_version = latest_release.get("tag_name", "v1.0.0")
+            print(f'Актуальнейшая версия: {latest_version} ')
+            print(f'Ваша версия: {__version__}')
 
             if latest_version != __version__:
-                reply = QMessageBox.question(
-                    None, "Обновление",
-                    f"Доступна новая версия {latest_version}. Хотите обновить программу?",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-                )
+                print('latest_version != __version__')
 
-                if reply == QMessageBox.StandardButton.Yes:
-                    download_url = f"https://github.com/sharkye1/Szhimatar/releases/download/{latest_version}/main.py"
-                    response = requests.get(download_url)
-                    if response.status_code == 200:
+                download_url = f"https://github.com/sharkye1/Szhimatar/releases/download/{latest_version}/main.py"
+                response = requests.get(download_url)
+                if response.status_code == 200:
+                    try:
                         new_content = response.text
                         backup_file = __file__.replace(".py", "_backup.py")
 
-                        # Создаём резервную копию
+                        # Если резервная копия уже есть — удаляем её
+                        if os.path.exists(backup_file):
+                            os.remove(backup_file)
+
+                        # Создаём резервную копию (новую)
                         os.rename(__file__, backup_file)
 
                         with open(__file__, "w", encoding="utf-8", newline="\n") as f:
+                            print('Перезапись обновления...')
                             f.write(new_content)
 
-                        QMessageBox.information(None, "Обновление", "Программа обновлена. Перезапустите приложение.")
+                        print(f"Обновление {latest_version} установлено")
+                        QMessageBox.information(None, "Обновление", "Программа обновлена. Перезапуск...")
                         subprocess.Popen([sys.executable, __file__] + sys.argv[1:])
-                        sys.exit(0)
+                        return
+                    except Exception as e:
+                        log_error(f"Ошибка сохранения обновления: {e}")
+                        QMessageBox.critical(None, "Ошибка обновления", "Не удалось сохранить новый файл!")
+
+
     except Exception as e:
+        print('False')
+        log_error(f"Ошибка при проверке обновлений: {e}")
         print(f"Ошибка при проверке обновлений: {e}")
+def setup_license_logging():
+    """Настраивает логирование для скачивания лицензий."""
+    logger = logging.getLogger('LicenseDownload')
+    logger.setLevel(logging.INFO)
+    handler = logging.FileHandler('update_log.txt', encoding='utf-8')
+    handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+    logger.addHandler(handler)
+    return logger
 
 # Проверяем обновления при запуске
 check_for_updates()
+
+os.environ["QT_LOGGING_RULES"] = "*.debug=false"
+os.environ["QT_LOGGING_RULES"] = "ffmpeg.*=false"
+os.environ["QT_LOGGING_RULES"] = "qt.mediaplayer.*=false"
+os.environ["QT_LOGGING_RULES"] = "qt.multimedia.*=false"
 
 
 class VideoCompressor(QMainWindow):
@@ -77,6 +109,16 @@ class VideoCompressor(QMainWindow):
         self.start_time = None  # Время начала сжатия
         self.original_size = None  # Размер исходного файла
 
+        self.current_files = []  # Список выбранных файлов
+        self.processed_files = 0  # Счётчик обработанных файлов
+        self.failed_files = []  # Список файлов с ошибками
+        self.total_files = 0  # Общее количество файлов
+
+        self.compression_stats = []
+        self.is_multiple_files = False
+        self.compression_stats = []  # Для хранения статистики при обработке нескольких файлов
+
+
         self.settings = QSettings("MyCompany", "VideoCompressor")
         self.output_folder = self.settings.value("output_folder", "")  # Загружаем сохранённую папку
 
@@ -87,19 +129,42 @@ class VideoCompressor(QMainWindow):
         self.network_manager = QNetworkAccessManager(self)
         self.network_manager.finished.connect(self.on_image_downloaded)
         self.image_urls = [
-            "https://i.imgur.com/S721eIZ.png",  # Замените на ваши ссылки
+            "https://i.imgur.com/S721eIZ.png",
             "https://i.imgur.com/J2Ey9ce.png",
             "https://i.imgur.com/MswgFY3.png",
             "https://i.imgur.com/7RQtLnR.png",
             "https://i.imgur.com/IXNVtAa.png",
-
+            "https://i.imgur.com/9fF50Yg.jpeg",
+            "https://i.imgur.com/9Fw3ovV.jpg",
+            "https://i.imgur.com/CikkS0W.jpg",
+            "https://i.imgur.com/qiKyAVt.jpg",
+            "https://i.imgur.com/wYtN6mT.jpg",
+            "https://i.imgur.com/va2qErq.jpg",
+            "https://i.imgur.com/A81TezV.jpg",
+            "https://i.imgur.com/ujSXy3a.jpg",
+            "https://i.imgur.com/YeTYlfX.jpg"
         ]
         self.cache_dir = os.path.join(os.path.dirname(__file__), "backs")
         os.makedirs(self.cache_dir, exist_ok=True)  # Создаем папку, если её нет
 
+        self.music_dir = "nices"
+        self.current_track_index = 0
+        self.tracks = []
+        self.music_player = QMediaPlayer()
+        self.audio_output = QAudioOutput()
+        self.music_player.setAudioOutput(self.audio_output)
+
+        self.init_music()
+        self.init_music_ui()
+
         self.download_background_image()
 
         self.background_opacity = 0.2
+
+
+
+
+
 
     def download_background_image(self):
         """Скачивает новое изображение или использует уже скачанное."""
@@ -127,7 +192,7 @@ class VideoCompressor(QMainWindow):
 
     def get_downloaded_images(self):
         """Возвращает список уже скачанных изображений."""
-        return [f for f in os.listdir(self.cache_dir) if f.endswith(('.png', '.jpg', '.jpeg'))]
+        return [f for f in os.listdir(self.cache_dir) if f.endswith(('.png', '.jpg', '.jpeg', 'gif'))]
 
 
 
@@ -171,8 +236,82 @@ class VideoCompressor(QMainWindow):
             painter.setOpacity(self.background_opacity)
             painter.drawPixmap(self.rect(), scaled_pixmap)
 
+    def init_music_ui(self):
+        """Добавляет элементы управления музыкой в тулбар"""
+        toolbar = self.findChild(QToolBar)
 
+        # Кнопка паузы
+        self.pause_action = QAction("⏯", self)
+        self.pause_action.triggered.connect(self.toggle_music)
+        toolbar.addAction(self.pause_action)
 
+        # Кнопка следующего трека
+        self.next_action = QAction("⏭", self)
+        self.next_action.triggered.connect(self.next_track)
+        toolbar.addAction(self.next_action)
+
+    def init_music(self):
+        """Инициализирует музыкальные треки"""
+        # Убедимся, что папка существует
+        if not os.path.exists(self.music_dir):
+            #print(f"Папка {self.music_dir} не существует. Создаём...")
+            os.makedirs(self.music_dir, exist_ok=True)
+
+        track_url = "https://github.com/sharkye1/Szhimatar/raw/refs/heads/main/nain.mp3"
+        track_path = self.download_music(track_url)
+
+        # Формируем список треков
+        self.tracks = [f for f in os.listdir(self.music_dir) if f.endswith('.mp3')]
+        if track_path and os.path.exists(track_path):
+            self.tracks.insert(0, os.path.basename(track_path))  # Используем только имя файла
+            #print(f"Трек добавлен в список: {track_path}")
+
+    def download_music(self, url):
+        """Скачивает музыкальный трек с прямой ссылки"""
+        try:
+            filename = "nain.mp3"  # Имя файла
+            filepath = os.path.join(self.music_dir, filename)
+
+            if not os.path.exists(filepath):
+                # Скачиваем файл напрямую
+                response = requests.get(url, stream=True)
+                if response.status_code == 200:
+                    with open(filepath, 'wb') as f:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            f.write(chunk)
+                    #print(f"Трек скачан: {filepath}")
+                else:
+                    print(f"Ошибка: сервер вернул код {response.status_code}")
+                    return None
+            return filepath
+        except Exception as e:
+            #print(f"Ошибка загрузки музыки: {e}")
+            return None
+
+    def play_music(self):
+        """Начинает воспроизведение музыки"""
+        if self.tracks:
+            track = os.path.join(self.music_dir, self.tracks[self.current_track_index])
+            #print(f"Попытка воспроизвести трек: {track}")
+            self.music_player.setSource(QUrl.fromLocalFile(track))
+            self.audio_output.setVolume(1.0)  # Максимальная громкость
+            self.music_player.play()
+            #print("Музыка должна играть...")
+        #else:
+            #print("Нет доступных треков для воспроизведения.")
+
+    def toggle_music(self):
+        """Пауза/воспроизведение"""
+        if self.music_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.music_player.pause()
+        else:
+            self.music_player.play()
+
+    def next_track(self):
+        """Переключает на следующий трек"""
+        if self.tracks:
+            self.current_track_index = (self.current_track_index + 1) % len(self.tracks)
+            self.play_music()
 
     def init_ui(self):
         self.setWindowTitle("Сжиматор на NVENC")
@@ -201,13 +340,7 @@ class VideoCompressor(QMainWindow):
 
         # Настройки сжатия
         self.resolution_combo = QComboBox()
-        self.resolution_combo.addItems([
-            "160x120", "176x144", "240x160", "320x180", "320x240",
-            "400x240", "480x272", "480x320", "640x360", "640x480",
-            "720x480", "800x450", "800x600", "854x480", "960x540",
-            "1024x576", "1024x768", "1152x648", "1280x720", "1280x800",
-            "1280x960", "1366x768", "1440x900", "1600x900", "1920x1080"
-        ])
+        self.resolution_combo.addItems(["1488x1337"])
 
         self.audio_codec_combo = QComboBox()
         self.audio_codec_combo.addItems(["aac", "libmp3lame", "copy"])  # Добавляем варианты кодеков
@@ -302,7 +435,7 @@ class VideoCompressor(QMainWindow):
 
         # Кнопка запуска
         self.compress_btn = QPushButton("Сжать видео")
-        self.compress_btn.clicked.connect(self.compress_video)
+        self.compress_btn.clicked.connect(self.start_compression)
 
         self.separator1 = self.create_separator()
         self.separator2 = self.create_separator()
@@ -372,21 +505,37 @@ class VideoCompressor(QMainWindow):
             self.setStyleSheet(light_stylesheet)
             self.theme_action.setText("Тёмная тема")
 
+    # Добавить новый метод для запуска сжатия:
+    def start_compression(self):
+        """Определяет, какой сценарий использовать (один файл или несколько)"""
+        if self.current_files:
+            self.is_multiple_files = True
+            self.compress_multiple_videos()
+        elif hasattr(self, 'current_file'):
+            self.is_multiple_files = False
+            self.compress_video()
+        else:
+            QMessageBox.warning(self, "Ошибка", "Выберите файл(ы) для сжатия!")
+
 
     def select_file(self):
-        """Выбирает файл и обновляет интерфейс."""
-        file, _ = QFileDialog.getOpenFileName(
-            self, "Выберите видеофайл",
+        """Выбирает один или несколько видеофайлов"""
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "Выберите видеофайл(ы)",
             self.last_dir,
             "Video Files (*.mp4 *.avi *.mov *.mkv)"
         )
-        if file:
-            self.current_file = file
-            self.last_dir = os.path.dirname(file)
-            self.file_label.setText(f"Выбран файл: {os.path.basename(file)}")
+        if not files:
+            return
+
+        if len(files) == 1:
+
+            self.current_file = files[0]
+            self.last_dir = os.path.dirname(files[0])
+            self.file_label.setText(f"Выбран файл: {os.path.basename(files[0])}")
 
             # Получаем размер файла
-            original_size = os.path.getsize(file)
+            original_size = os.path.getsize(files[0])
 
             # Вычисляем 22% от исходного размера
             compressed_size = original_size * 0.22
@@ -400,12 +549,13 @@ class VideoCompressor(QMainWindow):
 
             # Обновляем отображение
             self.size_value.setText(f"{compressed_size_mb:.2f} MB ({percent_change:.2f}%)")
-
-
-
+        else:
+            # Несколько файлов — новый сценарий
+            self.current_files = files
+            self.current_file = None  # Очищаем текущий файл
+            self.file_label.setText(f"Выбрано файлов: {len(files)}")
 
     def compress_video(self):
-        print('Пошел компресс...')
         if not hasattr(self, 'current_file'):
             QMessageBox.warning(self, "Ошибка", "Выберите файл для сжатия!")
             return
@@ -442,7 +592,6 @@ class VideoCompressor(QMainWindow):
         input_file = f'"{self.current_file}"'
         output_file = output_file.replace('\\', '/')
         output_file = f'"{output_file}"'
-        print(output_file)
 
         cmd = [
             'ffmpeg',
@@ -464,13 +613,75 @@ class VideoCompressor(QMainWindow):
         self.process = QProcess()
         self.process.readyReadStandardError.connect(self.handle_log)
         self.process.finished.connect(self.on_finish)
-        print(f"Дана команда {cmd}")
         self.process.startCommand(' '.join(cmd))
 
         # Таймер для обновления прогресса
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_progress)
         self.timer.start(nkirill)
+
+    def compress_multiple_videos(self):
+        """Обрабатывает все выбранные файлы, показывая отчет только в конце."""
+        if not self.current_files:
+            QMessageBox.warning(self, "Ошибка", "Выберите файлы для сжатия!")
+            return
+
+        self.processed_files = 0
+        self.failed_files = []
+        self.total_files = len(self.current_files)
+        self.compression_stats = []  # Очищаем статистику перед началом
+        self.is_multiple_files = True  # Устанавливаем режим обработки нескольких файлов
+
+        self.progress_bar.setMaximum(100)  # Устанавливаем максимум в 100%
+        self.progress_bar.setValue(0)
+        self.log_area.clear()
+
+        progress_per_file = 100 / self.total_files  # Процент прогресса на один файл
+
+        for index, file in enumerate(self.current_files):
+            try:
+                self.current_file = file
+                self.file_label.setText(
+                    f"Обработка файла {index + 1}/{self.total_files}: "
+                    f"{os.path.basename(file)}"
+                )
+                QApplication.processEvents()  # Обновляем GUI
+
+                # Запускаем сжатие текущего файла
+                self.original_size = os.path.getsize(self.current_file)
+                self.start_time = time.time()
+                self.compress_video()
+
+                # Ожидаем завершения процесса
+                while self.process.state() == QProcess.ProcessState.Running:
+                    QApplication.processEvents()
+                    time.sleep(0.1)
+
+                self.processed_files += 1
+                self.progress_bar.setValue(int(self.processed_files * progress_per_file))
+
+            except Exception as e:
+                self.failed_files.append((file, str(e)))
+                self.log_area.append(f"Ошибка при обработке {file}: {e}")
+
+        # Формируем итоговый отчет
+        '''report = (
+            f"Обработка завершена!\n\n"
+            f"Успешно: {self.processed_files}/{self.total_files}\n"
+            f"Ошибки: {len(self.failed_files)}\n"
+        )
+
+        if self.failed_files:
+            report += "\nФайлы с ошибками:\n" + "\n".join(
+                [f"{os.path.basename(f[0])}: {f[1]}" for f in self.failed_files]
+            )
+
+        if self.compression_stats:
+            report += "\n\nСтатистика сжатия:\n" + "\n".join(self.compression_stats)
+
+        QMessageBox.information(self, "Отчёт", report)
+        self.current_files = []  # Очищаем список файлов
+        self.is_multiple_files = False  # Сбрасываем режим'''
 
     def update_speed_spin(self):
         """Обновляет значение скорости в QDoubleSpinBox при изменении ползунка."""
@@ -494,10 +705,38 @@ class VideoCompressor(QMainWindow):
         if hasattr(self, 'process') and self.process.state() == QProcess.ProcessState.Running:
             self.progress_bar.setValue(self.progress_bar.value() + 1)
 
+
     def on_finish(self):
         self.timer.stop()
         self.progress_bar.setValue(100)
-        QMessageBox.information(self, "Готово", "Сжатие завершено!")
+
+        # Вычисляем время выполнения
+        end_time = time.time()
+        elapsed_time = end_time - self.start_time
+
+        # Получаем размер сжатого файла
+        output_file = self.get_output_path()
+        compressed_size = os.path.getsize(output_file)
+
+        # Вычисляем процент сжатия
+        compression_ratio = (1 - (compressed_size / self.original_size)) * 100
+
+        # Формируем статистику для текущего видео
+        stats_message = (
+            f"Файл: {os.path.basename(self.current_file)}\n"
+            f"Исходный размер: {self.format_size(self.original_size)}\n"
+            f"Сжатый размер: {self.format_size(compressed_size)}\n"
+            f"Сжатие: {compression_ratio:.2f}%\n"
+            f"Время выполнения: {elapsed_time:.2f} секунд\n"
+        )
+
+        if self.is_multiple_files:
+            # При обработке нескольких файлов сохраняем статистику
+            self.compression_stats.append(stats_message)
+        else:
+            # При обработке одного файла показываем диалоговое окно
+            self.progress_bar.setValue(0)
+            #QMessageBox.information(self, "Статистика сжатия", stats_message)
 
     def get_output_path(self):
         base, ext = os.path.splitext(self.current_file)
@@ -686,7 +925,7 @@ class VideoCompressor(QMainWindow):
         )
 
         # Показываем статистику в диалоговом окне
-        QMessageBox.information(self, "Статистика сжатия", stats_message)
+        #QMessageBox.information(self, "Статистика сжатия", stats_message)
 
     def get_original_audio_bitrate(self):
         """Возвращает битрейт аудио с обработкой ошибок."""
@@ -731,9 +970,43 @@ class VideoCompressor(QMainWindow):
             self.setStyleSheet(light_stylesheet)
 
 
+def download_license_files():
+    """Скачивает лицензионные соглашения, если их нет в папке."""
+    logger = setup_license_logging()
+
+    # Ссылки на raw-версии лицензионных соглашений
+    license_urls = {
+        "ЛИЦЕНЗИОННОЕ СОГЛАШЕНИЕ НА ИСПОЛЬЗОВАНИЕ ПРОГРАММЫ.docx": "https://github.com/sharkye1/Szhimatar/raw/refs/heads/main/%D0%9B%D0%98%D0%A6%D0%95%D0%9D%D0%97%D0%98%D0%9E%D0%9D%D0%9D%D0%9E%D0%95%20%D0%A1%D0%9E%D0%93%D0%9B%D0%90%D0%A8%D0%95%D0%9D%D0%98%D0%95%20%D0%9D%D0%90%20%D0%98%D0%A1%D0%9F%D0%9E%D0%9B%D0%AC%D0%97%D0%9E%D0%92%D0%90%D0%9D%D0%98%D0%95%20%D0%9F%D0%A0%D0%9E%D0%93%D0%A0%D0%90%D0%9C%D0%9C%D0%AB.docx",
+        "LICENSE AGREEMENT FOR THE USE OF THE PROGRAM.docx": "https://github.com/sharkye1/Szhimatar/raw/refs/heads/main/LICENSE%20AGREEMENT%20FOR%20THE%20USE%20OF%20THE%20PROGRAM.docx"
+    }
+
+    # Путь к текущей директории (где находится main.py)
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+
+    for filename, url in license_urls.items():
+        file_path = os.path.join(current_dir, filename)
+
+        # Проверяем, существует ли файл
+        if not os.path.exists(file_path):
+            try:
+                # Скачиваем файл
+                response = requests.get(url)
+                response.raise_for_status()  # Проверяем, что запрос успешен
+
+                # Сохраняем файл в текущую директорию
+                with open(file_path, "wb") as f:
+                    f.write(response.content)
+                logger.info(f"Файл {filename} успешно скачан в {current_dir}")
+            except requests.RequestException as e:
+                logger.error(f"Ошибка при скачивании {filename}: {e}")
+        else:
+            logger.info(f"Файл {filename} уже существует в {current_dir}")
+
 if __name__ == "__main__":
-    nkirill = 40
+    nkirill = 42
+    download_license_files()
     app = QApplication(sys.argv)
     window = VideoCompressor()
     window.show()
+
     app.exec()
