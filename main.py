@@ -5,6 +5,10 @@ import time
 import random
 import requests
 import logging
+import winreg
+import ctypes
+import tempfile
+from pathlib import Path
 
 import json
 import subprocess
@@ -20,7 +24,7 @@ from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput, QSoundEffect
 from styles import dark_stylesheet, light_stylesheet
 
 # Версия программы
-__version__ = "v1.1.2"
+__version__ = "v1.2 beta"
 
 
 def is_running_in_ide():
@@ -82,17 +86,22 @@ def check_for_updates():
         print('False')
         log_error(f"Ошибка при проверке обновлений: {e}")
         print(f"Ошибка при проверке обновлений: {e}")
+
+
 def setup_license_logging():
-    """Настраивает логирование для скачивания лицензий."""
-    logger = logging.getLogger('LicenseDownload')
-    logger.setLevel(logging.INFO)
-    handler = logging.FileHandler('update_log.txt', encoding='utf-8')
-    handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-    logger.addHandler(handler)
+    """Настраивает логирование."""
+    logger = logging.getLogger('Szhimatar')
+    if not logger.handlers:
+        logger.setLevel(logging.INFO)
+        log_dir = get_app_data_path()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        handler = logging.FileHandler(log_dir / "update_log.txt", encoding='utf-8')
+        handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        logger.addHandler(handler)
     return logger
 
 # Проверяем обновления при запуске
-check_for_updates()
+#check_for_updates()
 
 os.environ["QT_LOGGING_RULES"] = "*.debug=false"
 os.environ["QT_LOGGING_RULES"] = "ffmpeg.*=false"
@@ -160,9 +169,13 @@ class VideoCompressor(QMainWindow):
         self.download_background_image()
 
         self.background_opacity = 0.2
-
-
-
+        prompt_add_context_menu(self)
+        # Проверяем аргументы командной строки
+        if len(sys.argv) > 1:
+            self.current_files = [f for f in sys.argv[1:] if f.lower().endswith('.mp4')]
+            if self.current_files:
+                self.is_multiple_files = True
+                self.compress_multiple_videos()
 
 
 
@@ -879,6 +892,8 @@ class VideoCompressor(QMainWindow):
             self.last_dir = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.HomeLocation)
             self.apply_theme('dark')
 
+
+
     def select_output_folder(self):
         """Позволяет пользователю выбрать папку для сохранения."""
         folder = QFileDialog.getExistingDirectory(self, "Выберите папку для сохранения", self.output_folder)
@@ -999,8 +1014,139 @@ def download_license_files():
                 logger.info(f"Файл {filename} успешно скачан в {current_dir}")
             except requests.RequestException as e:
                 logger.error(f"Ошибка при скачивании {filename}: {e}")
-        else:
-            logger.info(f"Файл {filename} уже существует в {current_dir}")
+
+
+
+def check_context_menu():
+    """Проверяет наличие команды в реестре."""
+    logger = setup_license_logging()
+    progid = get_mp4_progid()
+    key_path = f"{progid}\\shell\\CompressWithSzhimatar"
+    command_path = f"{key_path}\\command"
+    try:
+        with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, key_path, 0, winreg.KEY_READ) as key:
+            value = winreg.QueryValueEx(key, "")[0]
+            if value != "Сжать сжиматором":
+                logger.warning(f"Найден ключ {key_path}, но значение некорректно: {value}")
+                return False
+        with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, command_path, 0, winreg.KEY_READ) as key:
+            command = winreg.QueryValueEx(key, "")[0]
+            expected_start = sys.executable if getattr(sys, 'frozen', False) else f'"{sys.executable}"'
+            if not command.startswith(expected_start):
+                logger.warning(f"Найдена команда {command}, но она некорректна")
+                return False
+        logger.info(f"Команда 'Сжать сжиматором' найдена и корректна в {key_path}")
+        return True
+    except FileNotFoundError:
+        logger.info(f"Команда 'Сжать сжиматором' не найдена в {key_path}")
+        return False
+    except Exception as e:
+        logger.error(f"Ошибка проверки реестра: {e}")
+        return False
+
+
+def get_mp4_progid():
+    """Определяет ProgID для MP4."""
+    logger = setup_license_logging()
+    try:
+        with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, ".mp4", 0, winreg.KEY_READ) as key:
+            progid = winreg.QueryValueEx(key, "")[0]
+            if progid:
+                try:
+                    with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, progid, 0, winreg.KEY_READ):
+                        logger.info(f"Найден ProgID для MP4: {progid}")
+                        return progid
+                except FileNotFoundError:
+                    logger.warning(f"Ветка {progid} не существует, используется mp4file")
+                    return "mp4file"
+            logger.warning("ProgID для MP4 пустой, используется mp4file")
+            return "mp4file"
+    except Exception as e:
+        logger.error(f"Ошибка при определении ProgID для MP4: {e}")
+        return "mp4file"
+
+
+def add_context_menu():
+    """Добавляет команду в контекстное меню."""
+    logger = setup_license_logging()
+    try:
+        program_path = sys.executable if getattr(sys, 'frozen',
+                                                 False) else f'"{sys.executable}" "{os.path.abspath(__file__)}"'
+        logger.info(f"Путь к программе: {program_path}")
+
+        progid = get_mp4_progid()
+        key_path = f"{progid}\\shell\\CompressWithSzhimatar"
+
+        with winreg.CreateKeyEx(winreg.HKEY_CLASSES_ROOT, key_path, 0, winreg.KEY_SET_VALUE | winreg.KEY_WRITE) as key:
+            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, "Сжать сжиматором")
+            winreg.SetValueEx(key, "MultiSelectModel", 0, winreg.REG_SZ, "Player")
+            logger.info(f"Создан ключ {key_path}")
+
+        command_path = f"{key_path}\\command"
+        with winreg.CreateKeyEx(winreg.HKEY_CLASSES_ROOT, command_path, 0,
+                                winreg.KEY_SET_VALUE | winreg.KEY_WRITE) as key:
+            command = f'{program_path} "%1"'
+            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, command)
+            logger.info(f"Создана команда: {command}")
+
+        if not check_context_menu():
+            logger.error("Ошибка: запись в реестре создана, но не прошла проверку")
+            return False
+
+        os.system("taskkill /IM explorer.exe /F && start explorer.exe")
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка добавления в реестр: {e}")
+        return False
+
+def get_app_data_path():
+    """Возвращает путь к папке AppData\Roaming\Szhimatar."""
+    return Path(os.getenv('APPDATA')) / "Szhimatar"
+
+def get_program_dir():
+    """Возвращает путь к папке программы."""
+    if getattr(sys, 'frozen', False):
+        return Path(sys.executable).parent
+    return Path(os.path.abspath(__file__)).parent
+
+def is_admin():
+    """Проверяет, запущена ли программа с правами администратора."""
+    try:
+        return ctypes.windll.shell32.IsUserAnAdmin()
+    except:
+        return False
+
+
+def prompt_add_context_menu(parent=None):
+    """Предлагает добавить команду в контекстное меню."""
+    logger = setup_license_logging()
+    if not check_context_menu():
+        if not is_admin():
+            msg = QMessageBox(parent)
+            msg.setWindowTitle("Требуются права администратора")
+            msg.setText("Для добавления опции 'Сжать сжиматором' нужны права администратора.\n"
+                        "Хотите перезапустить программу с правами администратора?")
+            msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            msg.setDefaultButton(QMessageBox.StandardButton.Yes)
+
+            if msg.exec() == QMessageBox.StandardButton.Yes:
+                logger.info("Пользователь согласился на перезапуск с правами администратора")
+                ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, f'"{os.path.abspath(__file__)}"',
+                                                    None, 1)
+                sys.exit(0)
+            return
+
+        msg = QMessageBox(parent)
+        msg.setWindowTitle("Добавление функции")
+        msg.setText("Хотите добавить опцию 'Сжать сжиматором' в контекстное меню для MP4-файлов?")
+        msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        msg.setDefaultButton(QMessageBox.StandardButton.Yes)
+
+        if msg.exec() == QMessageBox.StandardButton.Yes:
+            if add_context_menu():
+                QMessageBox.information(parent, "Успех", "Опция 'Сжать сжиматором' добавлена!")
+            else:
+                QMessageBox.critical(parent, "Ошибка", "Не удалось добавить опцию. См. update_log.txt.")
 
 if __name__ == "__main__":
     nkirill = 42
