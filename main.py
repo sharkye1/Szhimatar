@@ -24,7 +24,7 @@ from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput, QSoundEffect
 from styles import dark_stylesheet, light_stylesheet
 
 # Версия программы
-__version__ = "v1.2 beta"
+__version__ = "v1.2"
 
 
 def is_running_in_ide():
@@ -93,11 +93,18 @@ def setup_license_logging():
     logger = logging.getLogger('Szhimatar')
     if not logger.handlers:
         logger.setLevel(logging.INFO)
-        log_dir = get_app_data_path()
-        log_dir.mkdir(parents=True, exist_ok=True)
-        handler = logging.FileHandler(log_dir / "update_log.txt", encoding='utf-8')
-        handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-        logger.addHandler(handler)
+        try:
+            log_dir = get_program_dir()  # Используем папку программы
+            log_file = log_dir / "update_log.txt"
+            handler = logging.FileHandler(log_file, encoding='utf-8')
+            handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+            logger.addHandler(handler)
+        except Exception as e:
+            print(f"Ошибка настройки логирования: {e}")
+            # Временный лог в консоль
+            console_handler = logging.StreamHandler()
+            console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+            logger.addHandler(console_handler)
     return logger
 
 # Проверяем обновления при запуске
@@ -167,15 +174,15 @@ class VideoCompressor(QMainWindow):
         self.init_music_ui()
 
         self.download_background_image()
-
         self.background_opacity = 0.2
-        prompt_add_context_menu(self)
         # Проверяем аргументы командной строки
         if len(sys.argv) > 1:
             self.current_files = [f for f in sys.argv[1:] if f.lower().endswith('.mp4')]
             if self.current_files:
                 self.is_multiple_files = True
                 self.compress_multiple_videos()
+        self.update_context_menu_action()
+
 
 
 
@@ -333,9 +340,16 @@ class VideoCompressor(QMainWindow):
         toolbar = QToolBar("Панель инструментов")
         self.addToolBar(toolbar)
 
+        # Для темы:
         self.theme_action = QAction("Тема", self)
         self.theme_action.triggered.connect(self.toggle_theme)
         toolbar.addAction(self.theme_action)
+        # Для записей в реестре:
+        self.context_menu_action = QAction("", self)
+        self.context_menu_action.triggered.connect(self.toggle_context_menu)
+        toolbar.addAction(self.context_menu_action)
+
+
 
         self.file_label = QLabel("Выбери видеофайл:")
         self.file_btn = QPushButton("Обзор в проводнике...")
@@ -492,6 +506,69 @@ class VideoCompressor(QMainWindow):
         self.setCentralWidget(container)
 
         self.apply_theme(self.current_theme)
+
+    def toggle_context_menu(self):
+        """Добавляет или удаляет команду в контекстное меню."""
+        logger = setup_license_logging()
+        logger.info("Нажата кнопка управления контекстным меню")
+        if check_context_menu():
+            # Команда есть, удаляем
+            logger.info("Попытка удаления команды")
+            if is_admin():
+                if remove_context_menu():
+                    QMessageBox.information(self, "Успех", "Опция 'Сжать сжиматором' удалена из контекстного меню!")
+                    self.update_context_menu_action()
+                else:
+                    logger.error("Не удалось удалить команду")
+                    QMessageBox.critical(self, "Ошибка",
+                                         "Не удалось удалить опцию. Убедитесь, что программа запущена от имени администратора, и проверьте update_log.txt.")
+            else:
+                logger.info("Требуются права администратора для удаления")
+                msg = QMessageBox(self)
+                msg.setWindowTitle("Требуются права администратора")
+                msg.setText("Для удаления опции 'Сжать сжиматором' нужны права администратора.\n"
+                            "Перезапустить программу с правами администратора?")
+                msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+                if msg.exec() == QMessageBox.StandardButton.Yes:
+                    try:
+                        ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable,
+                                                            f'"{os.path.abspath(__file__)}"', None, 1)
+                        sys.exit(0)
+                    except Exception as e:
+                        logger.error(f"Ошибка запуска с правами администратора: {e}")
+                        QMessageBox.critical(self, "Ошибка", f"Не удалось перезапустить программу: {e}")
+        else:
+            # Команды нет, добавляем
+            logger.info("Попытка добавления команды")
+            if is_admin():
+                if add_context_menu():
+                    QMessageBox.information(self, "Успех", "Опция 'Сжать сжиматором' добавлена в контекстное меню!")
+                    self.update_context_menu_action()
+                else:
+                    logger.error("Не удалось добавить команду")
+                    QMessageBox.critical(self, "Ошибка", "Не удалось добавить опцию. Проверьте update_log.txt.")
+            else:
+                logger.info("Требуются права администратора для добавления")
+                msg = QMessageBox(self)
+                msg.setWindowTitle("Требуются права администратора")
+                msg.setText("Для добавления опции 'Сжать сжиматором' нужны права администратора.\n"
+                            "Перезапустить программу с правами администратора?")
+                msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+                if msg.exec() == QMessageBox.StandardButton.Yes:
+                    try:
+                        ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable,
+                                                            f'"{os.path.abspath(__file__)}"', None, 1)
+                        sys.exit(0)
+                    except Exception as e:
+                        logger.error(f"Ошибка запуска с правами администратора: {e}")
+                        QMessageBox.critical(self, "Ошибка", f"Не удалось перезапустить программу: {e}")
+
+    def update_context_menu_action(self):
+        """Обновляет текст кнопки в тулбаре."""
+        if check_context_menu():
+            self.context_menu_action.setText("Удалить из контекстного меню")
+        else:
+            self.context_menu_action.setText("Добавить в контекстное меню")
 
     def create_separator(self):
         """Создаёт горизонтальный разделитель."""
@@ -983,7 +1060,7 @@ class VideoCompressor(QMainWindow):
             self.setStyleSheet(dark_stylesheet)
         else:
             self.setStyleSheet(light_stylesheet)
-
+    """Конец метода VideoCompressor"""
 
 def download_license_files():
     """Скачивает лицензионные соглашения, если их нет в папке."""
@@ -1097,6 +1174,51 @@ def add_context_menu():
         return True
     except Exception as e:
         logger.error(f"Ошибка добавления в реестр: {e}")
+        return False
+def remove_context_menu():
+    """Удаляет команду 'Сжать сжиматором' из контекстного меню."""
+    logger = setup_license_logging()
+    logger.info("Попытка удаления команды из контекстного меню")
+    try:
+        progid = get_mp4_progid()
+        logger.info(f"ProgID для MP4: {progid}")
+        key_path = f"{progid}\\shell\\CompressWithSzhimatar"
+        command_path = f"{key_path}\\command"
+        logger.info(f"Проверка ключа: {key_path}")
+
+        # Проверяем права администратора
+        admin_status = is_admin()
+        logger.info(f"Запуск с правами администратора: {admin_status}")
+
+        # Проверяем наличие ключа
+        try:
+            with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, key_path, 0, winreg.KEY_READ):
+                logger.info(f"Ключ {key_path} существует")
+        except FileNotFoundError:
+            logger.info(f"Команда уже отсутствует в {key_path}")
+            return True
+
+        # Удаляем подключ command
+        try:
+            winreg.DeleteKeyEx(winreg.HKEY_CLASSES_ROOT, command_path, winreg.KEY_ALL_ACCESS, 0)
+            logger.info(f"Подключ {command_path} удалён")
+        except FileNotFoundError:
+            logger.info(f"Подключ {command_path} не существует")
+        except Exception as e:
+            logger.error(f"Ошибка удаления подключа {command_path}: {e}")
+
+        # Удаляем основной ключ
+        winreg.DeleteKeyEx(winreg.HKEY_CLASSES_ROOT, key_path, winreg.KEY_ALL_ACCESS, 0)
+        logger.info(f"Команда успешно удалена из {key_path}")
+
+        # Перезапускаем проводник
+        os.system("taskkill /IM explorer.exe /F && start explorer.exe")
+        return True
+    except FileNotFoundError:
+        logger.info(f"Команда уже отсутствует в {key_path}")
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка удаления из реестра: {e}")
         return False
 
 def get_app_data_path():
