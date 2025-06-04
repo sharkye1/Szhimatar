@@ -25,7 +25,7 @@ from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput, QSoundEffect
 from styles import dark_stylesheet, light_stylesheet, blue_stylesheet, green_stylesheet, yellow_stylesheet, red_stylesheet
 
 # Версия программы
-__version__ = "v1.2.4"
+__version__ = "v1.3"
 
 
 def is_running_in_ide():
