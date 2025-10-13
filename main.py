@@ -9,23 +9,41 @@ import winreg
 import ctypes
 import tempfile
 from pathlib import Path
+import shutil
+
+import threading
+import math
+import urllib.request
+from datetime import datetime
 
 import json
 import subprocess
-from PyQt6.QtGui import QAction, QPixmap, QPainter, QColor
+from PyQt6.QtGui import QAction, QPixmap, QPainter, QColor, QDesktopServices
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QLabel, QPushButton, QFileDialog, QComboBox, QSlider,
                              QSpinBox, QTextEdit, QMessageBox, QProgressBar,
                              QToolBar, QFrame, QInputDialog, QDoubleSpinBox, QDialog,
-                             QCheckBox, QTableWidgetItem, QTableWidget)
-from PyQt6.QtCore import Qt, QProcess, QStandardPaths, QTimer, QSettings, QUrl, pyqtSignal, QRect
-from PyQt6.QtNetwork import (QNetworkAccessManager, QNetworkRequest, QNetworkReply)
-from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput, QSoundEffect
+                             QCheckBox, QTableWidgetItem, QTableWidget, QGridLayout,
+                                )
+from PyQt6.QtCore import Qt, QProcess, QStandardPaths, QTimer, QSettings, QUrl
+from PyQt6.QtNetwork import (QNetworkAccessManager, QNetworkRequest, QNetworkReply,
+                                )
+from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 
-from styles import dark_stylesheet, light_stylesheet, blue_stylesheet, green_stylesheet, yellow_stylesheet, red_stylesheet
+from PyQt6.QtCore import QPropertyAnimation, QSequentialAnimationGroup, QEasingCurve
+from PyQt6.QtWidgets import QSplashScreen, QGraphicsOpacityEffect  # Не обязательно, но для сравнения
+#from PyQt6.QtGui import QGraphicsOpacityEffect
+
+from styles import dark_stylesheet, light_stylesheet, blue_stylesheet,\
+    green_stylesheet, yellow_stylesheet, red_stylesheet, midnight_soft_stylesheet
 
 # Версия программы
-__version__ = "v1.3"
+__version__ = "v1.5.0"
+
+
+
+if getattr(sys, 'frozen', False):
+    ctypes.windll.user32.ShowWindow(ctypes.windll.kernel32.GetConsoleWindow(), 0)
 
 
 def is_running_in_ide():
@@ -66,49 +84,35 @@ def check_for_updates(parent):
             # Показываем прогресс-бар
             update_dialog = UpdateDialog(parent, parent.current_theme)
             update_dialog.show()
+            update_dialog.start_download()  # Запускаем отсчет времени
             QApplication.processEvents()
 
-            # Определяем, что скачивать
             if getattr(sys, 'frozen', False):
                 # Для .exe
                 download_url = f"https://github.com/sharkye1/Szhimatar/releases/download/{latest_version}/Szhimatar.{latest_version.replace('v', '')}.exe"
                 new_exe_name = f"Szhimatar.{latest_version.replace('v', '')}.exe"
-            else:
-                # Для .py
-                download_url = f"https://github.com/sharkye1/Szhimatar/releases/download/{latest_version}/main.py"
-                new_exe_name = None
+                download_reply = network_manager.get(QNetworkRequest(QUrl(download_url)))
 
-            # Скачиваем файл
-            download_reply = network_manager.get(QNetworkRequest(QUrl(download_url)))
+                def update_progress(bytes_received, bytes_total):
+                    if bytes_total > 0:
+                        update_dialog.update_progress(bytes_received, bytes_total)
+                        QApplication.processEvents()
 
-            # Обновляем прогресс
-            def update_progress(bytes_received, bytes_total):
-                if bytes_total > 0:
-                    progress = int((bytes_received / bytes_total) * 100)
-                    update_dialog.set_progress(progress)
+                while not download_reply.isFinished():
                     QApplication.processEvents()
+                    time.sleep(0.01)
 
-            download_reply.downloadProgress.connect(update_progress)
-
-            while not download_reply.isFinished():
-                QApplication.processEvents()
-                time.sleep(0.01)
-
-            if download_reply.error() == QNetworkReply.NetworkError.NoError:
-                program_dir = get_program_dir()
-                if getattr(sys, 'frozen', False):
-                    # Обработка обновления .exe
+                if download_reply.error() == QNetworkReply.NetworkError.NoError:
+                    program_dir = get_program_dir()
                     temp_dir = Path(tempfile.gettempdir())
                     temp_exe_path = temp_dir / new_exe_name
                     with open(temp_exe_path, "wb") as f:
                         f.write(download_reply.readAll().data())
 
-                    # Создаем батник для замены .exe
-                    current_exe = Path(sys.executable)
                     batch_content = f"""@echo off
 timeout /t 2
-move /Y "{temp_exe_path}" "{current_exe}"
-start "" "{current_exe}"
+move /Y "{temp_exe_path}" "{Path(sys.executable)}"
+start "" "{Path(sys.executable)}"
 """
                     batch_path = program_dir / "update.bat"
                     with open(batch_path, "w", encoding="utf-8") as f:
@@ -120,50 +124,68 @@ start "" "{current_exe}"
                     QApplication.processEvents()
                     time.sleep(1)
 
-                    # Запускаем батник и выходим
                     subprocess.Popen(['cmd.exe', '/c', str(batch_path)])
                     parent.close()
                     QApplication.quit()
                     sys.exit(0)
                 else:
-                    # Обработка обновления .py
-                    new_content = download_reply.readAll().data().decode('utf-8')
-                    script_path = os.path.abspath(__file__)
-                    backup_file = script_path.replace(".py", "_backup.py")
-
-                    # Удаляем старую резервную копию
-                    if os.path.exists(backup_file):
-                        os.remove(backup_file)
-
-                    # Создаём резервную копию
-                    os.rename(script_path, backup_file)
-
-                    # Записываем новый файл
-                    with open(script_path, "w", encoding="utf-8", newline="\n") as f:
-                        f.write(new_content)
-
-                    logger.info(f"Обновление {latest_version} установлено")
-                    update_dialog.set_text("Обновление установлено, перезапуск...")
-                    update_dialog.set_progress(100)
-                    QApplication.processEvents()
-                    time.sleep(1)
-
-                    # Перезапускаем
-                    logger.info(f"Перезапуск: {sys.executable} {script_path}")
-                    parent.close()
-                    try:
-                        subprocess.Popen([sys.executable, script_path])
-                        logger.info("Перезапуск успешен")
-                    except Exception as e:
-                        logger.error(f"Ошибка перезапуска: {e}")
-                    QApplication.quit()
-                    sys.exit(0)
+                    error = download_reply.errorString()
+                    logger.error(f"Ошибка скачивания: {error}")
+                    update_dialog.close()
+                    QMessageBox.critical(parent, "Ошибка обновления",
+                                        f"Не удалось скачать обновление: {error}\nСм. update_log.txt")
             else:
-                error = download_reply.errorString()
-                logger.error(f"Ошибка скачивания: {error}")
-                update_dialog.close()
-                QMessageBox.critical(parent, "Ошибка обновления",
-                                    f"Не удалось скачать обновление: {error}\nСм. update_log.txt")
+                # Для .py: загружаем main.py и styles.py
+                files_to_update = ["main.py", "styles.py"]
+                for file_name in files_to_update:
+                    download_url = f"https://github.com/sharkye1/Szhimatar/releases/download/{latest_version}/{file_name}"
+                    logger.info(f"Скачивание {file_name} с {download_url}")
+                    download_reply = network_manager.get(QNetworkRequest(QUrl(download_url)))
+
+                    def update_progress(bytes_received, bytes_total):
+                        if bytes_total > 0:
+                            progress = int((bytes_received / bytes_total) * 100)
+                            update_dialog.set_progress(progress // len(files_to_update))
+                            QApplication.processEvents()
+
+                    download_reply.downloadProgress.connect(update_progress)
+
+                    while not download_reply.isFinished():
+                        QApplication.processEvents()
+                        time.sleep(0.01)
+
+                    if download_reply.error() == QNetworkReply.NetworkError.NoError:
+                        new_content = download_reply.readAll().data().decode('utf-8')
+                        file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), file_name)
+                        backup_file = file_path.replace(".py", "_backup.py")
+
+                        if os.path.exists(backup_file):
+                            os.remove(backup_file)
+                        if os.path.exists(file_path):
+                            os.rename(file_path, backup_file)
+
+                        with open(file_path, "w", encoding="utf-8", newline="\n") as f:
+                            f.write(new_content)
+                        logger.info(f"Файл {file_name} обновлён")
+                    else:
+                        error = download_reply.errorString()
+                        logger.error(f"Ошибка скачивания {file_name}: {error}")
+                        update_dialog.close()
+                        QMessageBox.critical(parent, "Ошибка обновления",
+                                            f"Не удалось скачать {file_name}: {error}\nСм. update_log.txt")
+                        return
+
+                update_dialog.set_text("Обновление установлено, перезапуск...")
+                update_dialog.set_progress(100)
+                QApplication.processEvents()
+                time.sleep(1)
+
+                script_path = os.path.abspath("main.py")
+                logger.info(f"Перезапуск: {sys.executable} {script_path}")
+                parent.close()
+                subprocess.Popen([sys.executable, script_path])
+                QApplication.quit()
+                sys.exit(0)
         else:
             logger.info("Программа на последней версии")
     except Exception as e:
@@ -197,7 +219,165 @@ os.environ["QT_LOGGING_RULES"] = "ffmpeg.*=false"
 os.environ["QT_LOGGING_RULES"] = "qt.mediaplayer.*=false"
 os.environ["QT_LOGGING_RULES"] = "qt.multimedia.*=false"
 
+# Настройка логирования для отладки
+'''logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)'''
 
+# Класс для заставки
+class SplashWindow(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Splash Screen")
+        self.setStyleSheet("background-color: black;")  # Полностью чёрный фон
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
+        self.setWindowState(Qt.WindowState.WindowFullScreen)  # Полноэкранный режим
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)  # Скрытие панели задач
+
+        # Главный layout для центрирования
+        main_layout = QVBoxLayout(self)
+        main_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        main_layout.setContentsMargins(0, 0, 0, 0)  # Убираем отступы
+        self.setLayout(main_layout)
+
+        # Внутренний layout для горизонтального центрирования
+        logo_layout = QHBoxLayout()
+        logo_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        logo_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.addLayout(logo_layout)
+
+        logo_size = int(1920)
+        #logger.info(f"Установлен размер логотипа: {logo_size}x{logo_size}")
+
+        # Путь к логотипу в директории программы
+        self.logo_path = os.path.join(os.path.dirname(__file__), "logo1.png")
+        #logger.info(f"Проверяем наличие логотипа: {self.logo_path}")
+
+        # Проверяем и загружаем логотип, если его нет
+        self.download_logo_if_missing()
+
+        # Логотип
+        self.logo = QLabel(self)
+        pixmap = QPixmap(self.logo_path)
+        if pixmap.isNull():
+            #logger.error(f"Не удалось загрузить логотип: {self.logo_path}")
+            pixmap = QPixmap(100, 100)  # Заглушка
+            pixmap.fill(Qt.GlobalColor.red)  # Красный фон для отладки
+        self.logo.setPixmap(pixmap.scaled(logo_size, logo_size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        self.logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.logo.setFixedSize(logo_size, logo_size)  # Фиксированный размер
+        self.logo.setGraphicsEffect(QGraphicsOpacityEffect(self.logo))
+        self.logo.graphicsEffect().setOpacity(0.0)  # Начально скрыто
+        logo_layout.addWidget(self.logo)
+
+        # Анимации
+        self.setup_animations()
+
+    def download_logo_if_missing(self):
+        """Скачивает логотип, если он отсутствует в директории программы."""
+        if not os.path.exists(self.logo_path):
+            logo_url = "https://raw.githubusercontent.com/sharkye1/Szhimatar/12e8581b407f33de2be7eb37558e0ef0b1931329/logo1.png"  # Замените на вашу реальную ссылку
+            #logger.info(f"Логотип не найден, скачиваем с {logo_url}")
+            try:
+                response = requests.get(logo_url, timeout=10)
+                response.raise_for_status()  # Проверяем успешность запроса
+                with open(self.logo_path, "wb") as f:
+                    f.write(response.content)
+                #logger.info(f"Логотип успешно сохранён: {self.logo_path}")
+            except Exception as e:
+                pass
+                #logger.error(f"Ошибка при скачивании логотипа: {str(e)}")
+                # Продолжаем с заглушкой, если скачивание не удалось
+
+    def setup_animations(self):
+        # Fade-in для логотипа
+        fade_in = QPropertyAnimation(self.logo.graphicsEffect(), b"opacity")
+        fade_in.setDuration(1500)  # 1.5 секунды
+        fade_in.setStartValue(0.0)
+        fade_in.setEndValue(1.0)
+        fade_in.setEasingCurve(QEasingCurve.Type.InOutQuad)
+
+        # Fade-out для логотипа
+        fade_out = QPropertyAnimation(self.logo.graphicsEffect(), b"opacity")
+        fade_out.setDuration(1000)
+        fade_out.setStartValue(1.0)
+        fade_out.setEndValue(0.0)
+        fade_out.setEasingCurve(QEasingCurve.Type.InOutQuad)
+
+        # Группа анимаций
+        self.animation_group = QSequentialAnimationGroup()
+        self.animation_group.addAnimation(fade_in)
+        self.animation_group.addPause(2000)  # Пауза 2 секунды
+        self.animation_group.addAnimation(fade_out)
+
+        # Закрываем splash
+        self.animation_group.finished.connect(self.close)
+        self.animation_group.start()
+class DownloadFFmpegDialog(QDialog):
+    def __init__(self, parent=None, theme='light'):
+        super().__init__(parent)
+        self.setWindowTitle("Установка FFmpeg")
+        self.setFixedSize(500, 300)  # Увеличим для текста инструкции
+        self.setModal(True)
+        self.parent = parent
+
+        layout = QVBoxLayout()
+
+        # Информация
+        info_label = QLabel("Для работы программы нужен FFmpeg. Мы откроем браузер для скачивания архива с официального сайта.")
+        info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
+
+        # Инструкция
+        self.instruction_label = QLabel(
+            "Инструкция:\n"
+            "1. Скачайте архив 'ffmpeg-release-full.7z' с сайта.\n"
+            "2. Распакуйте архив в удобную папку (рекомендуем в папку программы).\n"
+            "3. В настройках программы (⚙️) выберите путь к 'ffmpeg.exe' из распакованной папки (обычно в bin/).\n"
+            "4. Если нужно, добавьте папку с FFmpeg в системный PATH для автоматического обнаружения.\n"
+            "После этого программа будет готова к работе!"
+        )
+        self.instruction_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self.instruction_label.setWordWrap(True)
+        layout.addWidget(self.instruction_label)
+
+        # Кнопки
+        buttons_layout = QHBoxLayout()
+        self.download_btn = QPushButton("📥 Открыть страницу скачивания")
+        self.download_btn.clicked.connect(self.open_download_page)
+        buttons_layout.addWidget(self.download_btn)
+
+        self.cancel_btn = QPushButton("❌ Отмена")
+        self.cancel_btn.clicked.connect(self.reject)
+        buttons_layout.addWidget(self.cancel_btn)
+
+        layout.addLayout(buttons_layout)
+        self.setLayout(layout)
+
+        self.apply_theme(theme)
+
+    def apply_theme(self, theme):
+        """Применяет тему."""
+        if theme == 'dark':
+            self.setStyleSheet(dark_stylesheet)
+        elif theme == 'light':
+            self.setStyleSheet(light_stylesheet)
+        elif theme == 'blue':
+            self.setStyleSheet(blue_stylesheet)
+        elif theme == 'green':
+            self.setStyleSheet(green_stylesheet)
+        elif theme == 'yellow':
+            self.setStyleSheet(yellow_stylesheet)
+        elif theme == 'red':
+            self.setStyleSheet(red_stylesheet)
+        elif theme == 'midnight':
+            self.setStyleSheet(midnight_soft_stylesheet)
+
+    def open_download_page(self):
+        """Открывает браузер на странице скачивания и закрывает диалог."""
+        url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full.7z"  # Прямая ссылка на файл (браузер начнёт скачивание)
+        QDesktopServices.openUrl(QUrl(url))  # Открывает в браузере по умолчанию
+        self.accept()  # Закрываем диалог после открытия
 
 
 class HistoryDialog(QDialog):
@@ -261,6 +441,8 @@ class HistoryDialog(QDialog):
             self.setStyleSheet(yellow_stylesheet)
         elif theme == 'red':
             self.setStyleSheet(red_stylesheet)
+        elif theme == 'midnight_soft_stylesheet':
+            self.setStyleSheet(midnight_soft_stylesheet)
     def load_history(self):
         """Загружает историю из файла compression_history.json."""
         history_file = str(get_program_dir() / "compression_history.json")
@@ -333,24 +515,102 @@ class HistoryDialog(QDialog):
         else:
             return f"{size / (1024 * 1024 * 1024):.2f} GB"
 
+
 class UpdateDialog(QDialog):
     """Окно с прогресс-баром для обновления."""
+
     def __init__(self, parent=None, theme='light'):
         super().__init__(parent)
         self.setWindowTitle("Обновление программы")
-        self.setFixedSize(300, 100)
+        self.setFixedSize(400, 150)  # Увеличим высоту для новой информации
         self.setModal(True)
 
+        self.start_time = None
+        self.last_bytes_received = 0
+        self.last_update_time = None
+
         layout = QVBoxLayout()
+
+        # Основной текст
         self.label = QLabel("Установка обновления...")
+        layout.addWidget(self.label)
+
+        # Прогресс-бар
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
-        layout.addWidget(self.label)
         layout.addWidget(self.progress_bar)
+
+        # Информация о скорости и времени
+        info_layout = QHBoxLayout()
+
+        # Скорость скачивания
+        self.speed_label = QLabel("Скорость: -")
+        self.speed_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        info_layout.addWidget(self.speed_label)
+
+        # Оставшееся время
+        self.time_label = QLabel("Осталось: -")
+        self.time_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        info_layout.addWidget(self.time_label)
+
+        layout.addLayout(info_layout)
         self.setLayout(layout)
 
         # Применяем стиль
         self.apply_theme(theme)
+
+    def start_download(self):
+        """Начинает отсчет времени для расчета скорости."""
+        self.start_time = time.time()
+        self.last_bytes_received = 0
+        self.last_update_time = self.start_time
+
+    def update_progress(self, bytes_received, bytes_total):
+        """Обновляет прогресс с расчетом скорости и времени."""
+        if bytes_total > 0:
+            progress = int((bytes_received / bytes_total) * 100)
+            self.progress_bar.setValue(progress)
+
+            # Рассчитываем скорость и оставшееся время
+            current_time = time.time()
+
+            if self.start_time is None:
+                self.start_download()
+
+            # Рассчитываем текущую скорость
+            time_diff = current_time - self.last_update_time
+            if time_diff > 0.5:  # Обновляем не чаще чем раз в 0.5 секунды
+                bytes_diff = bytes_received - self.last_bytes_received
+                speed_kbps = (bytes_diff / time_diff) / 1024  # KB/s
+
+                # Форматируем скорость
+                if speed_kbps > 1024:
+                    speed_str = f"{speed_kbps / 1024:.1f} MB/s"
+                else:
+                    speed_str = f"{speed_kbps:.1f} KB/s"
+
+                self.speed_label.setText(f"Скорость: {speed_str}")
+
+                # Рассчитываем оставшееся время
+                if speed_kbps > 0:
+                    bytes_remaining = bytes_total - bytes_received
+                    seconds_remaining = bytes_remaining / (speed_kbps * 1024)
+
+                    # Форматируем время
+                    if seconds_remaining > 3600:
+                        time_str = f"{int(seconds_remaining // 3600)}ч {int((seconds_remaining % 3600) // 60)}м"
+                    elif seconds_remaining > 60:
+                        time_str = f"{int(seconds_remaining // 60)}м {int(seconds_remaining % 60)}с"
+                    else:
+                        time_str = f"{int(seconds_remaining)}с"
+
+                    self.time_label.setText(f"Осталось: {time_str}")
+                else:
+                    self.time_label.setText("Осталось: -")
+
+                # Обновляем последние значения
+                self.last_bytes_received = bytes_received
+                self.last_update_time = current_time
 
     def apply_theme(self, theme):
         """Применяет стиль тёмной, светлой, синей, зелёной, жёлтой или красной темы."""
@@ -366,9 +626,11 @@ class UpdateDialog(QDialog):
             self.setStyleSheet(yellow_stylesheet)
         elif theme == 'red':
             self.setStyleSheet(red_stylesheet)
+        elif theme == 'midnight_soft_stylesheet':
+            self.setStyleSheet(midnight_soft_stylesheet)
 
     def set_progress(self, value):
-        """Обновляет прогресс-бар."""
+        """Обновляет прогресс-бар (для обратной совместимости)."""
         self.progress_bar.setValue(value)
 
     def set_text(self, text):
@@ -396,7 +658,7 @@ class StatsDialog(QDialog):
 
     def apply_theme(self, theme):
         """Применяет стиль тёмной, светлой, синей, зелёной, жёлтой или красной темы."""
-        self.logger.info(f"Применение темы: {theme}")
+        #self.logger.info(f"Применение темы: {theme}")
         if theme == 'dark':
             self.setStyleSheet(dark_stylesheet)
             self.stats_label.setStyleSheet("color: #000000; background: transparent;")
@@ -415,6 +677,10 @@ class StatsDialog(QDialog):
         elif theme == 'red':
             self.setStyleSheet(red_stylesheet)
             self.stats_label.setStyleSheet("color: #460000; background: transparent;")
+        elif theme == 'midnight_soft_stylesheet':
+            self.setStyleSheet(midnight_soft_stylesheet)
+            self.stats_label.setStyleSheet("color: #1e252f; background: transparent;")
+
         self.stats_label.setAutoFillBackground(False)  # Отключаем заливку фона
 
     def load_stats(self):
@@ -468,6 +734,305 @@ class StatsDialog(QDialog):
             return f"{size / (1024 * 1024 * 1024):.2f} GB"
 
 
+class SettingsDialog(QDialog):
+    def __init__(self, parent=None, theme='light', version="v1.0.0"):
+        super().__init__(parent)
+        self.setWindowTitle("Настройки программы")
+        self.setFixedSize(440, 700)
+        self.setModal(True)
+        self.logger = setup_license_logging()
+        self.logger.info("Инициализация окна настроек")
+
+        self.parent = parent
+        self.version = version
+
+        layout = QVBoxLayout()
+
+        # Информация о версии
+        version_label = QLabel(f"Версия программы: {version}")
+        version_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        version_label.setStyleSheet("font-weight: bold; font-size: 14px; padding: 10px;")
+        layout.addWidget(version_label)
+
+        layout.addWidget(self.create_separator())
+
+        # Смена темы
+        theme_label = QLabel("🎨 Смена темы оформления:")
+        layout.addWidget(theme_label)
+
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItems(["Светлая", "Тёмная", "Синяя", "Зелёная", "Жёлтая", "Красная", "Приятная"])
+        self.theme_combo.setCurrentText(self.get_theme_name(parent.current_theme))
+        self.theme_combo.currentIndexChanged.connect(self.change_theme)
+        layout.addWidget(self.theme_combo)
+
+        layout.addWidget(self.create_separator())
+
+        # Контекстное меню
+        context_menu_label = QLabel("📋 Контекстное меню Windows:")
+        layout.addWidget(context_menu_label)
+
+        self.context_menu_btn = QPushButton()
+        self.update_context_menu_button()
+        self.context_menu_btn.clicked.connect(self.toggle_context_menu)
+        layout.addWidget(self.context_menu_btn)
+
+        layout.addWidget(self.create_separator())
+
+        # Статистика
+        stats_label = QLabel("📊 Статистика сжатия:")
+        layout.addWidget(stats_label)
+
+        stats_btn = QPushButton("📈 Показать статистику")
+        stats_btn.clicked.connect(self.show_stats)
+        layout.addWidget(stats_btn)
+
+        layout.addWidget(self.create_separator())
+
+        # История сжатия
+        history_label = QLabel("📜 История сжатия:")
+        layout.addWidget(history_label)
+
+        history_btn = QPushButton("📖 Показать историю")
+        history_btn.clicked.connect(self.show_history)
+        layout.addWidget(history_btn)
+
+        layout.addWidget(self.create_separator())
+
+        # Проверка обновлений
+        update_label = QLabel("🔄 Обновления программы:")
+        layout.addWidget(update_label)
+
+        update_btn = QPushButton("🔍 Проверить обновления")
+        update_btn.clicked.connect(self.check_updates)
+        layout.addWidget(update_btn)
+
+        layout.addWidget(self.create_separator())
+
+        #
+        layout.addWidget(self.create_separator())
+        # Секция для заставки
+        splash_label = QLabel("🖼️ Заставка при запуске:")
+        layout.addWidget(splash_label)
+        self.show_splash_checkbox = QCheckBox("Показывать заставку при запуске")
+        self.show_splash_checkbox.setChecked(
+            self.parent.settings.value("show_splash", True, type=bool))  # Загружаем значение (по умолчанию True)
+        self.show_splash_checkbox.stateChanged.connect(self.save_splash_setting)  # Сохраняем при изменении
+        layout.addWidget(self.show_splash_checkbox)
+
+
+        # Кнопка закрытия
+        '''close_btn = QPushButton("✅ Закрыть настройки")
+        close_btn.clicked.connect(self.accept)
+        layout.addWidget(close_btn)'''
+
+        self.setLayout(layout)
+        self.apply_theme(parent.current_theme if parent else 'light')
+
+
+        # Секция FFmpeg
+        ffmpeg_label = QLabel("🎬 Настройки FFmpeg:")
+        layout.addWidget(ffmpeg_label)
+
+        # Текущий путь к FFmpeg
+        self.ffmpeg_path_label = QLabel("Поиск FFmpeg... Нажмите '🔄 Обновить'")
+        layout.addWidget(self.ffmpeg_path_label)
+
+        # Замените QHBoxLayout на QGridLayout
+        ffmpeg_buttons_grid = QGridLayout()
+        ffmpeg_buttons_grid.setSpacing(5)  # Расстояние между кнопками
+
+        # Кнопка обновления информации
+        refresh_ffmpeg_btn = QPushButton("🔄 Обновить")
+        refresh_ffmpeg_btn.clicked.connect(self.update_ffmpeg_info)
+        ffmpeg_buttons_grid.addWidget(refresh_ffmpeg_btn, 0, 0)
+
+        # Кнопка выбора кастомного пути
+        custom_ffmpeg_btn = QPushButton("📁 Выбрать FFmpeg")
+        custom_ffmpeg_btn.clicked.connect(self.select_custom_ffmpeg)
+        ffmpeg_buttons_grid.addWidget(custom_ffmpeg_btn, 0, 1)
+
+        # Кнопка сброса к стандартному пути
+        reset_ffmpeg_btn = QPushButton("↩️ Сбросить")
+        reset_ffmpeg_btn.clicked.connect(self.reset_ffmpeg_path)
+        ffmpeg_buttons_grid.addWidget(reset_ffmpeg_btn, 1, 0)
+
+        # Кнопка скачивания FFmpeg
+        download_ffmpeg_btn = QPushButton("📥 Скачать FFmpeg (бета)")
+        download_ffmpeg_btn.clicked.connect(self.download_ffmpeg)
+        ffmpeg_buttons_grid.addWidget(download_ffmpeg_btn, 1, 1)
+
+        # Устанавливаем растяжение колонок
+        ffmpeg_buttons_grid.setColumnStretch(0, 1)
+        ffmpeg_buttons_grid.setColumnStretch(1, 1)
+
+        layout.addLayout(ffmpeg_buttons_grid)
+        layout.addWidget(self.create_separator())
+
+        # Красивая панель с информацией
+        copyright_widget = QWidget()
+        copyright_widget.setStyleSheet("background-color: #2a2a2a; border-radius: 5px;")
+        copyright_layout = QHBoxLayout(copyright_widget)
+        copyright_layout.setContentsMargins(10, 5, 10, 5)
+
+        # Иконка
+        icon_label = QLabel("🦈")  # Акула как ник sharkye1
+        icon_label.setStyleSheet("font-size: 14px;")
+
+        # Текст
+        text_label = QLabel(
+            '© 2024-2025 <a href="https://github.com/sharkye1" style="color: #6ab0de; text-decoration: none;">sharkye1</a>. Все права защищены.')
+        text_label.setOpenExternalLinks(True)
+        text_label.setTextFormat(Qt.TextFormat.RichText)
+        text_label.setStyleSheet("color: #ccc; font-size: 10px;")
+
+        copyright_layout.addWidget(icon_label)
+        copyright_layout.addStretch()
+        copyright_layout.addWidget(text_label)
+        copyright_layout.addStretch()
+
+        layout.addWidget(copyright_widget)
+
+    def save_splash_setting(self, state):
+        self.parent.settings.setValue("show_splash", state == Qt.CheckState.Checked.value)
+
+    def download_ffmpeg(self):
+        """Запускает процесс установки FFmpeg."""
+        dialog = DownloadFFmpegDialog(self, self.parent.current_theme)
+        dialog.exec()  # Диалог покажет инструкцию и откроет браузер
+        # После закрытия диалога обнови информацию о FFmpeg
+        self.update_ffmpeg_info()
+
+    def update_ffmpeg_info(self):
+        """Обновляет информацию о FFmpeg."""
+        try:
+            ffmpeg_path = self.parent.get_ffmpeg_path()
+            custom_path = self.parent.settings.value("custom_ffmpeg_path")
+
+            if custom_path and os.path.exists(custom_path):
+                status = "✅ Настроен вручную"
+                path = custom_path
+            elif ffmpeg_path:
+                status = "✅ Найден автоматически"
+                path = ffmpeg_path
+            else:
+                status = "❌ Не найден"
+                path = "FFmpeg не установлен или не добавлен в PATH"
+
+            # Получаем версию FFmpeg
+            version = self.get_ffmpeg_version(ffmpeg_path if not custom_path else custom_path)
+
+            self.ffmpeg_path_label.setText(
+                f"Статус: {status}\n"
+                f"Путь: {path}\n"
+                f"Версия: {version}"
+            )
+
+        except Exception as e:
+            self.logger.error(f"Ошибка обновления информации FFmpeg: {e}")
+            self.ffmpeg_path_label.setText("Ошибка получения информации о FFmpeg")
+
+    def get_ffmpeg_version(self, ffmpeg_path):
+        """Получает версию FFmpeg."""
+        try:
+            if ffmpeg_path and os.path.exists(ffmpeg_path):
+                result = subprocess.run([ffmpeg_path, '-version'],
+                                        capture_output=True, text=True, timeout=5)
+                if result.returncode == 0:
+                    first_line = result.stdout.split('\n')[0]
+                    return first_line.strip()
+            return "Неизвестно"
+        except Exception:
+            return "Неизвестно"
+
+    def select_custom_ffmpeg(self):
+        """Позволяет выбрать кастомный путь к FFmpeg."""
+        if self.parent.set_custom_ffmpeg_path():
+            self.update_ffmpeg_info()
+
+    def reset_ffmpeg_path(self):
+        """Сбрасывает кастомный путь к FFmpeg."""
+        self.parent.settings.remove("custom_ffmpeg_path")
+        QMessageBox.information(self, "Успех", "Путь к FFmpeg сброшен к стандартному")
+        self.update_ffmpeg_info()
+
+    def create_separator(self):
+        separator = QFrame()
+        separator.setFrameShape(QFrame.Shape.HLine)
+        separator.setFrameShadow(QFrame.Shadow.Sunken)
+        return separator
+
+    def get_theme_name(self, theme_key):
+        theme_names = {
+            'light': 'Светлая',
+            'dark': 'Тёмная',
+            'blue': 'Синяя',
+            'green': 'Зелёная',
+            'yellow': 'Жёлтая',
+            'red': 'Красная',
+            'midnight': 'Приятная'
+        }
+        return theme_names.get(theme_key, 'Светлая')
+
+    def get_theme_key(self, theme_name):
+        theme_keys = {
+            'Светлая': 'light',
+            'Тёмная': 'dark',
+            'Синяя': 'blue',
+            'Зелёная': 'green',
+            'Жёлтая': 'yellow',
+            'Красная': 'red',
+            'Приятная': 'midnight'
+        }
+        return theme_keys.get(theme_name, 'light')
+
+    def change_theme(self):
+        theme_name = self.theme_combo.currentText()
+        theme_key = self.get_theme_key(theme_name)
+        if self.parent:
+            self.parent.current_theme = theme_key
+            self.parent.apply_theme(theme_key)
+            self.apply_theme(theme_key)
+
+    def update_context_menu_button(self):
+        if check_context_menu():
+            self.context_menu_btn.setText("🗑️ Удалить из контекстного меню")
+        else:
+            self.context_menu_btn.setText("➕ Добавить в контекстное меню")
+
+    def toggle_context_menu(self):
+        if self.parent:
+            self.parent.toggle_context_menu()
+            self.update_context_menu_button()
+
+    def show_stats(self):
+        if self.parent:
+            self.parent.open_stats_dialog()
+
+    def show_history(self):
+        if self.parent:
+            self.parent.open_history_dialog()
+
+    def check_updates(self):
+        if self.parent:
+            self.parent.check_for_updates()
+
+    def apply_theme(self, theme):
+        if theme == 'dark':
+            self.setStyleSheet(dark_stylesheet)
+        elif theme == 'light':
+            self.setStyleSheet(light_stylesheet)
+        elif theme == 'blue':
+            self.setStyleSheet(blue_stylesheet)
+        elif theme == 'green':
+            self.setStyleSheet(green_stylesheet)
+        elif theme == 'yellow':
+            self.setStyleSheet(yellow_stylesheet)
+        elif theme == 'red':
+            self.setStyleSheet(red_stylesheet)
+        elif theme == 'midnight':
+            self.setStyleSheet(midnight_soft_stylesheet)
+
 class VideoCompressor(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -494,6 +1059,7 @@ class VideoCompressor(QMainWindow):
         self.init_ui()
         self.load_presets()
         self.load_settings()
+        self.show_splash = self.settings.value("show_splash", True, type=bool)  # Добавьте атрибут класса
         self.background_image = QPixmap()
         self.network_manager = QNetworkAccessManager(self)
         self.network_manager.finished.connect(self.on_image_downloaded)
@@ -524,9 +1090,105 @@ class VideoCompressor(QMainWindow):
                 self.is_multiple_files = True
                 self.compress_multiple_videos()
         self.update_context_menu_action()
-        # Проверка обновлений
-        self.check_for_updates()
+        # Проверка обновлений при запуске программы
+        #self.check_for_updates()
 
+    def get_ffmpeg_path(self):
+        """Возвращает путь к ffmpeg или None если не найден."""
+        try:
+            # Сначала проверяем кастомный путь
+            custom_path = self.settings.value("custom_ffmpeg_path")
+            if custom_path and os.path.exists(custom_path):
+                return custom_path
+
+            # Проверяем стандартный путь в PATH
+            ffmpeg_path = shutil.which('ffmpeg')
+            if ffmpeg_path:
+                return ffmpeg_path
+
+            # Проверяем возможные альтернативные пути
+            possible_paths = [
+                r"C:\ffmpeg\bin\ffmpeg.exe",
+                r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
+                r"C:\Program Files (x86)\ffmpeg\bin\ffmpeg.exe",
+                os.path.join(os.getcwd(), "ffmpeg", "bin", "ffmpeg.exe"),
+                os.path.join(get_program_dir(), "ffmpeg", "bin", "ffmpeg.exe")
+            ]
+
+            for path in possible_paths:
+                if os.path.exists(path):
+                    return path
+
+            return None
+        except Exception as e:
+            self.logger.error(f"Ошибка поиска FFmpeg: {e}")
+            return None
+
+    def set_custom_ffmpeg_path(self):
+        """Позволяет пользователю выбрать кастомный путь к ffmpeg."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Выберите исполняемый файл FFmpeg",
+            "",
+            "Executable Files (*.exe);;All Files (*)"
+        )
+
+        if file_path and os.path.exists(file_path):
+            # Проверяем, что это действительно ffmpeg
+            try:
+                result = subprocess.run([file_path, '-version'],
+                                        capture_output=True, text=True, timeout=5)
+                if 'ffmpeg version' in result.stdout:
+                    # Сохраняем путь в настройках
+                    self.settings.setValue("custom_ffmpeg_path", file_path)
+                    QMessageBox.information(self, "Успех",
+                                            f"FFmpeg успешно настроен:\n{file_path}")
+                    return True
+                else:
+                    QMessageBox.warning(self, "Ошибка",
+                                        "Выбранный файл не является FFmpeg")
+            except Exception as e:
+                QMessageBox.warning(self, "Ошибка",
+                                    f"Не удалось проверить FFmpeg: {e}")
+
+        return False
+
+    def get_ffmpeg_command(self):
+        """Возвращает команду ffmpeg с учетом кастомного пути."""
+        try:
+            # Сначала проверяем кастомный путь из настроек
+            custom_path = self.settings.value("custom_ffmpeg_path")
+            if custom_path and os.path.exists(custom_path):
+                self.logger.info(f"Используется кастомный FFmpeg: {custom_path}")
+                return custom_path
+
+            # Проверяем ffmpeg в различных местах
+            possible_paths = [
+                # В папке с программой
+                os.path.join(get_program_dir(), "ffmpeg.exe"),
+                os.path.join(get_program_dir(), "ffmpeg", "bin", "ffmpeg.exe"),
+                os.path.join(get_program_dir(), "bin", "ffmpeg.exe"),
+
+                # Стандартные пути установки
+                r"C:\ffmpeg\bin\ffmpeg.exe",
+                r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
+                r"C:\Program Files (x86)\ffmpeg\bin\ffmpeg.exe",
+
+                # В PATH
+                shutil.which('ffmpeg') or ''
+            ]
+
+            for path in possible_paths:
+                if path and os.path.exists(path):
+                    self.logger.info(f"Найден FFmpeg: {path}")
+                    return path
+
+            self.logger.warning("FFmpeg не найден ни в одном из мест")
+            return 'ffmpeg'  # Будет искать в PATH
+
+        except Exception as e:
+            self.logger.error(f"Ошибка получения пути FFmpeg: {e}")
+            return 'ffmpeg'
 
 
     def download_background_image(self):
@@ -551,7 +1213,8 @@ class VideoCompressor(QMainWindow):
                 self.update()
                 #print(f"Используем уже скачанное изображение: {random_image}")
             else:
-                print("Нет доступных изображений.")
+                #print("Нет доступных изображений.")
+                self.logger.info(f"Нет доступных изображений")
 
     def get_downloaded_images(self):
         """Возвращает список уже скачанных изображений."""
@@ -584,9 +1247,11 @@ class VideoCompressor(QMainWindow):
 
                 #print(f"Изображение сохранено в: {cache_path}")
             else:
-                print("Ошибка: изображение не содержит данных.")
+                self.logger.info('Ошибка: изображение не содержит данных.')
+                #print("Ошибка: изображение не содержит данных.")
         else:
-            print("Ошибка при загрузке изображения:", reply.errorString())
+            self.logger.info(f"Ошибка при загрузке изображения: {reply.errorString()}")
+            #print("Ошибка при загрузке изображения:", reply.errorString())
 
     def paintEvent(self, event):
         """Отрисовывает фоновое изображение."""
@@ -601,17 +1266,17 @@ class VideoCompressor(QMainWindow):
 
     def init_music_ui(self):
         """Добавляет элементы управления музыкой в тулбар"""
-        toolbar = self.findChild(QToolBar)
+        #toolbar = self.findChild(QToolBar)
 
         # Кнопка паузы
         self.pause_action = QAction("⏯", self)
         self.pause_action.triggered.connect(self.toggle_music)
-        toolbar.addAction(self.pause_action)
+        #toolbar.addAction(self.pause_action)
 
         # Кнопка следующего трека
         self.next_action = QAction("⏭", self)
         self.next_action.triggered.connect(self.next_track)
-        toolbar.addAction(self.next_action)
+        #toolbar.addAction(self.next_action)
 
     def init_music(self):
         """Инициализирует музыкальные треки"""
@@ -644,7 +1309,7 @@ class VideoCompressor(QMainWindow):
                             f.write(chunk)
                     #print(f"Трек скачан: {filepath}")
                 else:
-                    print(f"Ошибка: сервер вернул код {response.status_code}")
+                    #print(f"Ошибка: сервер вернул код {response.status_code}")
                     return None
             return filepath
         except Exception as e:
@@ -686,13 +1351,15 @@ class VideoCompressor(QMainWindow):
 
             duration = self.get_video_duration()
             mid_time = duration / 2
+
+            ffmpeg_cmd = self.get_ffmpeg_command() # в 1.4.0 для 1.4.1
             cmd = [
-                'ffmpeg', '-y', '-i', video_path, '-ss', str(mid_time),
+                ffmpeg_cmd, '-y', '-i', video_path, '-ss', str(mid_time),
                 '-frames:v', '1', '-q:v', '2', '-vf', 'scale=320:180',
                 str(preview_path)
             ]
             self.logger.info(f"Генерация превью для {video_path}: {' '.join(cmd)}")
-            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.run_subprocess(cmd, capture_output=False)
             if os.path.exists(preview_path):
                 self.logger.info(f"Превью создано: {preview_path}")
                 return str(preview_path)
@@ -703,37 +1370,44 @@ class VideoCompressor(QMainWindow):
             self.logger.error(f"Ошибка генерации превью для {video_path}: {str(e)}")
             return None
 
+    def open_settings(self):
+        """Открывает диалоговое окно настроек."""
+        self.logger.info("Открытие окна настроек")
+        dialog = SettingsDialog(self, self.current_theme, __version__)
+        dialog.exec()
+
     def init_ui(self):
         self.setWindowTitle("Сжиматор на NVENC")
         self.setGeometry(100, 100, 800, 700)
 
-        toolbar = QToolBar("Панель инструментов")
+        # Создаем горизонтальный layout для кнопки
+        top_layout = QHBoxLayout()
+        # Создаем кнопку настроек
+        settings_btn = QPushButton("⚙️ Настройки")
+        settings_btn.clicked.connect(self.open_settings)
+        settings_btn.setFixedSize(111, 30)
+        top_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
 
-        '''class ToolBarArea(enum.Flag):
-            LeftToolBarArea = ...  # type: Qt.ToolBarArea
-            RightToolBarArea = ...  # type: Qt.ToolBarArea
-            TopToolBarArea = ...  # type: Qt.ToolBarArea
-            BottomToolBarArea = ...  # type: Qt.ToolBarArea
-            AllToolBarAreas = ...  # type: Qt.ToolBarArea
-            NoToolBarArea = ...  # type: Qt.ToolBarArea'''
-        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
+        # Основной вертикальный layout
+        main_layout = QVBoxLayout()
+        main_layout.addLayout(top_layout)  # Добавляем горизонтальный layout с кнопкой
 
         # Для темы:
         self.theme_action = QAction("☀️Тема 🌙", self)
         self.theme_action.triggered.connect(self.toggle_theme)
-        toolbar.addAction(self.theme_action)
+        #toolbar.addAction(self.theme_action)
         # Для записей в реестре:
         self.context_menu_action = QAction("", self)
         self.context_menu_action.triggered.connect(self.toggle_context_menu)
-        toolbar.addAction(self.context_menu_action)
+        #toolbar.addAction(self.context_menu_action)
 
         stats_action = QAction("📊 Статистика 📊", self)
         stats_action.triggered.connect(self.open_stats_dialog)
-        toolbar.addAction(stats_action)
+        #toolbar.addAction(stats_action)
 
         history_action = QAction("📜 История сжатия 📜", self)
         history_action.triggered.connect(self.open_history_dialog)
-        toolbar.addAction(history_action)
+        #toolbar.addAction(history_action)
 
         self.file_label = QLabel("📷 Выбери видеофайл: 📷")
         self.file_btn = QPushButton("📂 Обзор в проводнике... 📂")
@@ -798,18 +1472,28 @@ class VideoCompressor(QMainWindow):
         bitrate_layout.addWidget(self.bitrate_slider)
         bitrate_layout.addWidget(self.bitrate_spin)
 
-        # Настройка выбора фпса
+        # Настройка выбора фпс
+        fps_layout = QHBoxLayout()
+
+        # Галочка автоматического определения
+        self.auto_fps_checkbox = QCheckBox("Определять автоматически")
+        self.auto_fps_checkbox.setChecked(True)  # По умолчанию включено
+        self.auto_fps_checkbox.stateChanged.connect(self.toggle_auto_fps)
+        fps_layout.addWidget(self.auto_fps_checkbox)
+
+        # Ползунок FPS
         self.fps_slider = QSlider(Qt.Orientation.Horizontal)
-        self.fps_slider.setRange(1, 60)
+        self.fps_slider.setRange(1, 240)
         self.fps_spin = QSpinBox()
-        self.fps_spin.setRange(1, 60)
-        self.fps_spin.setFixedWidth(60)  # Фиксированная ширина
+        self.fps_spin.setRange(1, 240)
+        self.fps_spin.setFixedWidth(60)
         self.fps_slider.valueChanged.connect(self.fps_spin.setValue)
         self.fps_spin.valueChanged.connect(self.fps_slider.setValue)
 
-        fps_layout = QHBoxLayout()
+        #fps_layout.addWidget(QLabel("FPS:"))
         fps_layout.addWidget(self.fps_slider)
         fps_layout.addWidget(self.fps_spin)
+
 
         # Настройки скорости видео
         self.speed_slider = QSlider(Qt.Orientation.Horizontal)
@@ -870,6 +1554,7 @@ class VideoCompressor(QMainWindow):
         # Компоновка
 
         layout = QVBoxLayout()
+        layout.addWidget(settings_btn, alignment=Qt.AlignmentFlag.AlignRight)
         layout.addWidget(self.file_label)
         layout.addWidget(self.file_btn)
         layout.addWidget(self.separator1)
@@ -919,6 +1604,85 @@ class VideoCompressor(QMainWindow):
         self.setCentralWidget(container)
 
         self.apply_theme(self.current_theme)
+
+    def toggle_auto_fps(self, state):
+        """Включает/выключает автоматическое определение FPS."""
+        if state == Qt.CheckState.Checked.value:
+            self.fps_slider.setEnabled(False)
+            self.fps_spin.setEnabled(False)
+            # Автоматически определяем FPS при включении галочки
+            self.auto_detect_fps()
+        else:
+            self.fps_slider.setEnabled(True)
+            self.fps_spin.setEnabled(True)
+
+    def auto_detect_fps(self):
+        """Автоматически определяет FPS видео и устанавливает значение."""
+        if not hasattr(self, 'current_file') or not self.current_file:
+            return
+
+        try:
+            fps = self.get_video_fps()
+            if fps:
+                # Ограничиваем максимальным значением 120
+                fps_value = min(round(fps), 120)
+                self.fps_spin.setValue(fps_value)
+                self.logger.info(f"Автоматически определен FPS: {fps} -> установлено: {fps_value}")
+            else:
+                self.logger.warning("Не удалось определить FPS автоматически")
+
+        except Exception as e:
+            self.logger.error(f"Ошибка автоматического определения FPS: {e}")
+
+    def get_video_fps(self):
+        """Возвращает FPS видео файла."""
+        try:
+            if not hasattr(self, 'current_file') or not self.current_file:
+                return None
+
+            # Используем ffprobe для получения информации о видео
+            ffprobe_cmd = self.get_ffprobe_command()
+            if not ffprobe_cmd:
+                self.logger.error("ffprobe не найден для определения FPS")
+                return None
+
+            cmd = [
+                ffprobe_cmd,
+                '-v', 'error',
+                '-select_streams', 'v:0',
+                '-show_entries', 'stream=avg_frame_rate',
+                '-of', 'default=noprint_wrappers=1:nokey=1',
+                self.current_file
+            ]
+
+            # Запускаем процесс
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10,
+                                    creationflags=subprocess.CREATE_NO_WINDOW if platform.system() == 'Windows' else 0)
+
+            if result.returncode == 0:
+                fps_str = result.stdout.strip()
+                # Обрабатываем разные форматы FPS (например, "30000/1001")
+                if '/' in fps_str:
+                    num, den = fps_str.split('/')
+                    try:
+                        return float(num) / float(den)
+                    except (ValueError, ZeroDivisionError):
+                        return float(fps_str)
+                else:
+                    return float(fps_str)
+
+            return None
+
+        except FileNotFoundError:
+            self.logger.error("ffprobe не найден для определения FPS")
+            return None
+        except subprocess.TimeoutExpired:
+            self.logger.warning("Таймаут определения FPS")
+            return None
+        except Exception as e:
+            self.logger.error(f"Ошибка определения FPS: {e}")
+            return None
+
 
     def open_history_dialog(self):
         """Открывает диалоговое окно истории сжатия."""
@@ -1038,12 +1802,12 @@ class VideoCompressor(QMainWindow):
         return separator
 
     def toggle_theme(self):
-        themes = ['dark', 'light', 'blue', 'green', 'yellow', 'red']  # Список доступных тем
+        themes = ['dark', 'light', 'blue', 'green', 'yellow', 'red', 'midnight']  # Список доступных тем
         current_index = themes.index(self.current_theme)
         next_index = (current_index + 1) % len(themes)  # Переход к следующей теме
         self.current_theme = themes[next_index]
         self.apply_theme(self.current_theme)
-        self.logger.info(f"Тема изменена на: {self.current_theme}")
+        #self.logger.info(f"Тема изменена на: {self.current_theme}")
 
 
 
@@ -1067,7 +1831,7 @@ class VideoCompressor(QMainWindow):
         files, _ = QFileDialog.getOpenFileNames(
             self, "Выберите видеофайл(ы)",
             self.last_dir,
-            "Video Files (*.mp4 *.avi *.mov *.mkv)"
+            "Video Files (*.mp4 *.avi *.mov *.mkv *.webm *.flv *.wmv)"
         )
 
         if not files:
@@ -1085,6 +1849,10 @@ class VideoCompressor(QMainWindow):
             self.current_file = files[0]
             self.file_label.setText(f"Выбран файл: {os.path.basename(files[0])}")
             logger.info(f"Выбран один файл: {files[0]}")
+
+            # Автоматически определяем FPS если галочка активна
+            if self.auto_fps_checkbox.isChecked():
+                self.auto_detect_fps()
         else:
             self.file_label.setText(f"Выбрано файлов: {len(files)}")
             logger.info(f"Выбрано несколько файлов: {', '.join([os.path.basename(f) for f in files])}")
@@ -1100,8 +1868,11 @@ class VideoCompressor(QMainWindow):
         if not self.current_file:
             return QPixmap()
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.jpg')
+
+        ffmpeg_cmd = self.get_ffmpeg_command()
+
         cmd = [
-            'ffmpeg',
+            ffmpeg_cmd,
             '-ss', time_str,
             '-i', self.current_file,
             '-frames:v', '1',
@@ -1109,7 +1880,7 @@ class VideoCompressor(QMainWindow):
             temp_file.name,
             '-y'  # Перезаписывать файл
         ]
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.run_subprocess(cmd, capture_output=False)
         pixmap = QPixmap(temp_file.name)
         os.remove(temp_file.name)
         return pixmap
@@ -1145,7 +1916,18 @@ class VideoCompressor(QMainWindow):
             output_file = self.get_output_path()
             codec = "hevc_nvenc" if self.codec_combo.currentText().startswith("hevc") else "h264_nvenc"
             bitrate = f"{self.bitrate_spin.value()}M"
+
+            # Автоматически определяем FPS если нужно
+            if self.auto_fps_checkbox.isChecked():
+                auto_fps = self.get_video_fps()
+                if auto_fps:
+                    fps_value = min(round(auto_fps), 120)
+                    self.fps_spin.setValue(fps_value)
+                    logger.info(f"Используется автоматический FPS: {fps_value}")
+
+            # Получаем выбранный FPS
             fps = self.fps_spin.value()
+
             audio_codec = self.audio_codec_combo.currentText()
             audio_bitrate = f"{self.audio_bitrate_spin.value()}k"
             speed = self.speed_spin.value()
@@ -1156,10 +1938,15 @@ class VideoCompressor(QMainWindow):
             logger.info(f"Параметры сжатия: codec={codec}, bitrate={bitrate}, fps={fps}, "
                         f"audio_codec={audio_codec}, audio_bitrate={audio_bitrate}, speed={speed}")
 
+            # Получаем команду FFmpeg с учетом кастомного пути
+            ffmpeg_cmd = self.get_ffmpeg_command()
+            logger.info(f"Используемый FFmpeg: {ffmpeg_cmd}")
+
             cmd = [
-                'ffmpeg',
+                ffmpeg_cmd,
                 '-y',
-                '-hwaccel', 'cuda',
+                #'-hwaccel', 'cuda',
+                '-hwaccel_output_format', 'cuda',
                 '-i', input_file,
                 '-c:v', codec,
                 '-preset', 'p7',
@@ -1179,7 +1966,7 @@ class VideoCompressor(QMainWindow):
 
             # Проверяем существование FFmpeg
             try:
-                subprocess.run(['ffmpeg', '-version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                subprocess.run([ffmpeg_cmd, '-version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 logger.info("FFmpeg доступен")
             except FileNotFoundError:
                 logger.error("FFmpeg не найден в системе")
@@ -1191,7 +1978,12 @@ class VideoCompressor(QMainWindow):
             self.process.readyReadStandardError.connect(self.handle_log)
             self.process.finished.connect(self.on_finish)
             try:
+                '''if platform.system() == 'Windows':
+                    self.process.setCreateProcessArgumentsModifier(
+                        lambda args: args.append(subprocess.CREATE_NO_WINDOW)
+                    )'''
                 self.process.startCommand(' '.join(cmd))
+
                 logger.info("Процесс FFmpeg запущен")
             except Exception as e:
                 logger.error(f"Ошибка запуска процесса FFmpeg: {str(e)}")
@@ -1216,6 +2008,39 @@ class VideoCompressor(QMainWindow):
             self.progress_bar.setValue(0)
             if hasattr(self, 'timer'):
                 self.timer.stop()
+
+    def get_ffprobe_command(self):
+        """Возвращает команду ffprobe с учетом кастомного пути."""
+        try:
+            # Сначала проверяем кастомный путь из настроек
+            custom_path = self.settings.value("custom_ffmpeg_path")
+            if custom_path and os.path.exists(custom_path):
+                # Заменяем ffmpeg на ffprobe в пути
+                ffprobe_path = custom_path.replace('ffmpeg', 'ffprobe')
+                if os.path.exists(ffprobe_path):
+                    return ffprobe_path
+                # Если ffprobe не найден рядом с ffmpeg, используем из PATH
+                return 'ffprobe'
+
+            # Проверяем ffprobe в различных местах
+            possible_paths = [
+                os.path.join(get_program_dir(), "ffprobe.exe"),
+                os.path.join(get_program_dir(), "ffmpeg", "bin", "ffprobe.exe"),
+                os.path.join(get_program_dir(), "bin", "ffprobe.exe"),
+                r"C:\ffmpeg\bin\ffprobe.exe",
+                r"C:\Program Files\ffmpeg\bin\ffprobe.exe",
+                shutil.which('ffprobe') or ''
+            ]
+
+            for path in possible_paths:
+                if path and os.path.exists(path):
+                    return path
+
+            return 'ffprobe'  # Будет искать в PATH
+
+        except Exception as e:
+            self.logger.error(f"Ошибка получения пути ffprobe: {e}")
+            return 'ffprobe'
 
     def compress_multiple_videos(self):
         """Обрабатывает все выбранные файлы, показывая отчет только в конце."""
@@ -1242,6 +2067,9 @@ class VideoCompressor(QMainWindow):
                     f"Обработка файла {index + 1}/{self.total_files}: "
                     f"{os.path.basename(file)}"
                 )
+                # Автоматически определяем FPS для каждого файла если галочка активна
+                if self.auto_fps_checkbox.isChecked():
+                    self.auto_detect_fps()
                 QApplication.processEvents()  # Обновляем GUI
 
                 # Запускаем сжатие текущего файла
@@ -1261,24 +2089,6 @@ class VideoCompressor(QMainWindow):
                 self.failed_files.append((file, str(e)))
                 self.log_area.append(f"Ошибка при обработке {file}: {e}")
 
-        # Формируем итоговый отчет
-        '''report = (
-            f"Обработка завершена!\n\n"
-            f"Успешно: {self.processed_files}/{self.total_files}\n"
-            f"Ошибки: {len(self.failed_files)}\n"
-        )
-
-        if self.failed_files:
-            report += "\nФайлы с ошибками:\n" + "\n".join(
-                [f"{os.path.basename(f[0])}: {f[1]}" for f in self.failed_files]
-            )
-
-        if self.compression_stats:
-            report += "\n\nСтатистика сжатия:\n" + "\n".join(self.compression_stats)
-
-        QMessageBox.information(self, "Отчёт", report)
-        self.current_files = []  # Очищаем список файлов
-        self.is_multiple_files = False  # Сбрасываем режим'''
 
     def update_speed_spin(self):
         """Обновляет значение скорости в QDoubleSpinBox при изменении ползунка."""
@@ -1321,25 +2131,25 @@ class VideoCompressor(QMainWindow):
 
             end_time = time.time()
             elapsed_time = end_time - self.start_time
-            self.logger.info(f"Время выполнения сжатия: {elapsed_time:.2f} секунд")
+            #self.logger.info(f"Время выполнения сжатия: {elapsed_time:.2f} секунд")
 
             compressed_size = os.path.getsize(output_file)
-            self.logger.info(f"Размер сжатого файла: {self.format_size(compressed_size)}")
+            #self.logger.info(f"Размер сжатого файла: {self.format_size(compressed_size)}")
 
             compression_ratio = (1 - (compressed_size / self.original_size)) * 100
             space_saved = self.original_size - compressed_size
-            self.logger.info(f"Экономия места: {self.format_size(space_saved)}")
+            #self.logger.info(f"Экономия места: {self.format_size(space_saved)}")
 
             video_duration = self.get_video_duration()
-            self.logger.info(f"Длительность видео: {video_duration} секунд")
+            #self.logger.info(f"Длительность видео: {video_duration} секунд")
 
             preview_path = self.generate_preview(self.current_file)
-            self.logger.info(f"Путь к превью: {preview_path}")
+            #self.logger.info(f"Путь к превью: {preview_path}")
             self.update_stats(video_duration, space_saved, elapsed_time)
 
             # Сохранение в историю
             history_file = str(get_program_dir() / "compression_history.json")
-            self.logger.info(f"Попытка записи в историю: {history_file}")
+            #self.logger.info(f"Попытка записи в историю: {history_file}")
             try:
                 if not os.path.exists(history_file):
                     self.logger.info(f"Файл истории не существует, создается новый: {history_file}")
@@ -1439,8 +2249,10 @@ class VideoCompressor(QMainWindow):
                 startupinfo = subprocess.STARTUPINFO()
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
 
+            ffprobe_cmd = self.get_ffprobe_command()
+
             result = subprocess.run(
-                ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+                [ffprobe_cmd, '-v', 'error', '-show_entries', 'format=duration',
                  '-of', 'default=noprint_wrappers=1:nokey=1', self.current_file],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -1450,11 +2262,11 @@ class VideoCompressor(QMainWindow):
             )
             return float(result.stdout.strip())
         except Exception as e:
-            print(f"Ошибка получения длительности: {e}")
+            #print(f"Ошибка получения длительности: {e}")
             return 0.0
 
     def save_preset(self):
-        print('сейв пресет зашел')
+        #print('сейв пресет зашел')
         """Сохраняет текущие настройки как пресет."""
         preset_name, ok = QInputDialog.getText(self, "Сохранение пресета", "Введите имя пресета:")
         if ok and preset_name:
@@ -1560,7 +2372,7 @@ class VideoCompressor(QMainWindow):
                 self.apply_theme(settings.get('theme', 'dark'))
         except FileNotFoundError:
             self.last_dir = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.HomeLocation)
-            self.apply_theme('dark')  # Изменено с 'light' на 'dark'
+            self.apply_theme('midnight')  # Изменено с 'light' на 'dark'
         self.save_in_source_dir_checkbox.setChecked(self.settings.value("save_in_source_dir", True, type=bool))
 
 
@@ -1580,8 +2392,10 @@ class VideoCompressor(QMainWindow):
                 startupinfo = subprocess.STARTUPINFO()
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
 
+            ffprobe_cmd = self.get_ffprobe_command()  # Добавьте эту строку в начало метода
+
             result = subprocess.run(
-                ['ffprobe', '-v', 'error', '-show_entries', 'stream=bit_rate',
+                [ffprobe_cmd, '-v', 'error', '-show_entries', 'stream=bit_rate',
                  '-of', 'default=noprint_wrappers=1:nokey=1', '-select_streams', 'a:0', self.current_file],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -1591,7 +2405,7 @@ class VideoCompressor(QMainWindow):
             )
             return int(result.stdout.strip() or 0) / 1000
         except Exception as e:
-            print(f"Ошибка аудио битрейта: {e}")
+            #print(f"Ошибка аудио битрейта: {e}")
             return 0
 
 
@@ -1628,7 +2442,10 @@ class VideoCompressor(QMainWindow):
         elif theme == 'red':
             self.setStyleSheet(red_stylesheet)
             self.theme_action.setText("🔴 Красная тема 🔴")
-        self.logger.info(f"Применена тема: {theme}")
+        elif theme == 'midnight':
+            self.setStyleSheet(midnight_soft_stylesheet)
+            self.theme_action.setText("🟦 Приятная тема 🟦")
+        #self.logger.info(f"Применена тема: {theme}")
         # Обновление темы для диалоговых окон, если они открыты
         if hasattr(self, 'history_dialog') and self.history_dialog:
             self.history_dialog.apply_theme(theme)
@@ -1637,6 +2454,8 @@ class VideoCompressor(QMainWindow):
         if hasattr(self, 'update_dialog') and self.update_dialog:
             self.update_dialog.apply_theme(theme)
     """Конец метода VideoCompressor"""
+
+
 
 def download_license_files():
     """Скачивает лицензионные соглашения, если их нет в папке."""
@@ -1798,7 +2617,7 @@ def remove_context_menu():
         return False
 
 def get_app_data_path():
-    """Возвращает путь к папке AppData\Roaming\Szhimatar."""
+    r"""Возвращает путь к папке AppData\Roaming\Szhimatar."""
     return Path(os.getenv('APPDATA')) / "Szhimatar"
 
 def get_program_dir():
@@ -1846,11 +2665,24 @@ def prompt_add_context_menu(parent=None):
             else:
                 QMessageBox.critical(parent, "Ошибка", "Не удалось добавить опцию. См. update_log.txt.")
 
+
 if __name__ == "__main__":
     nkirill = 42
     download_license_files()
     app = QApplication(sys.argv)
-    window = VideoCompressor()
-    window.show()
 
+    window = VideoCompressor()  # Создайте window раньше
+
+    # Проверяем настройку
+    show_splash = window.settings.value("show_splash", True, type=bool)
+    if show_splash:
+        splash = SplashWindow()
+        splash.show()
+
+        # Ждём завершения анимации splash (он сам закроется)
+        while splash.isVisible():
+            app.processEvents()  # Обработка событий, чтобы анимация работала
+            #time.sleep(0.01)
+
+    window.show()
     app.exec()
